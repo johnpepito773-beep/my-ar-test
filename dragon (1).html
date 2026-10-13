@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Fire Dragon AR</title>
+    <script src="https://aframe.io/releases/1.3.0/aframe.min.js"></script>
+    <script src="https://raw.githack.com/AR-js-org/AR.js/master/aframe/build/aframe-ar.js"></script>
+
+    <script>
+      // Fire breath: shoots glowing particles out of the dragon's mouth,
+      // breathing for a few seconds, then pausing, over and over.
+      AFRAME.registerComponent('fire-breath', {
+        schema: {
+          count:   { default: 80 },    // how many fire particles exist
+          rate:    { default: 55 },    // particles per second while breathing
+          speed:   { default: 2.2 },   // how fast the fire shoots forward
+          onTime:  { default: 2200 },  // ms of breathing fire
+          offTime: { default: 1600 }   // ms of rest between breaths
+        },
+
+        init: function () {
+          var THREE = AFRAME.THREE;
+          this.particles = [];
+          this.spawnAcc = 0;
+          this.c1 = new THREE.Color('#fff3a0'); // hot yellow
+          this.c2 = new THREE.Color('#ff7a00'); // orange
+          this.c3 = new THREE.Color('#b31200'); // dark red
+
+          var geo = new THREE.SphereGeometry(0.06, 8, 8);
+          for (var i = 0; i < this.data.count; i++) {
+            var mat = new THREE.MeshBasicMaterial({
+              color: 0xffaa00,
+              transparent: true,
+              opacity: 0,
+              blending: THREE.AdditiveBlending,
+              depthWrite: false
+            });
+            var mesh = new THREE.Mesh(geo, mat);
+            mesh.visible = false;
+            this.el.object3D.add(mesh);
+            this.particles.push({ mesh: mesh, life: 0, max: 1, alive: false, vel: new THREE.Vector3() });
+          }
+          this.light = null;
+        },
+
+        spawn: function () {
+          for (var i = 0; i < this.particles.length; i++) {
+            var p = this.particles[i];
+            if (!p.alive) {
+              p.alive = true;
+              p.life = 0;
+              p.max = 0.45 + Math.random() * 0.35;
+              p.mesh.position.set((Math.random() - 0.5) * 0.05, (Math.random() - 0.5) * 0.05, 0);
+              p.vel.set(
+                (Math.random() - 0.5) * 0.5,
+                (Math.random() - 0.5) * 0.4 + 0.1,
+                this.data.speed * (0.8 + Math.random() * 0.4)
+              );
+              p.mesh.visible = true;
+              return;
+            }
+          }
+        },
+
+        tick: function (time, delta) {
+          var dt = Math.min(delta || 16, 50) / 1000;
+          var d = this.data;
+          var breathing = (time % (d.onTime + d.offTime)) < d.onTime;
+
+          if (breathing) {
+            this.spawnAcc += dt * d.rate;
+            while (this.spawnAcc >= 1) { this.spawn(); this.spawnAcc -= 1; }
+          }
+
+          for (var i = 0; i < this.particles.length; i++) {
+            var p = this.particles[i];
+            if (!p.alive) continue;
+            p.life += dt;
+            var t = p.life / p.max;
+            if (t >= 1) { p.alive = false; p.mesh.visible = false; continue; }
+
+            p.mesh.position.addScaledVector(p.vel, dt);
+            p.vel.y += 0.6 * dt; // fire rises a little
+            var s = 1 + t * 3.5;
+            p.mesh.scale.set(s, s, s);
+
+            var col = p.mesh.material.color;
+            if (t < 0.5) col.copy(this.c1).lerp(this.c2, t * 2);
+            else col.copy(this.c2).lerp(this.c3, (t - 0.5) * 2);
+            p.mesh.material.opacity = 1 - t;
+          }
+
+          // Flickering orange glow from the mouth while breathing
+          if (!this.light) {
+            var lightEl = this.el.querySelector('[light]');
+            if (lightEl) this.light = lightEl.getObject3D('light');
+          }
+          if (this.light) {
+            this.light.intensity = breathing ? 1.5 + Math.random() * 0.8 : 0;
+          }
+        }
+      });
+    </script>
+
+    <style>
+      .hint {
+        position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%);
+        z-index: 10; background: rgba(0,0,0,0.6); color: #fff;
+        font: 15px sans-serif; padding: 8px 14px; border-radius: 20px;
+        pointer-events: none;
+      }
+      .mode {
+        position: fixed; left: 50%; top: 16px; transform: translateX(-50%);
+        z-index: 10; background: #ff7a00; color: #fff; border: none;
+        font: bold 15px sans-serif; padding: 10px 16px; border-radius: 20px;
+      }
+    </style>
+  </head>
+
+  <body style="margin:0; overflow:hidden;">
+    <div class="hint">🐉 Point your camera at the Hiro marker</div>
+    <button id="modeBtn" class="mode">Marker on table? Tap here</button>
+    <script>
+      var tableMode = false;
+      document.getElementById('modeBtn').addEventListener('click', function () {
+        var stand = document.getElementById('stand');
+        tableMode = !tableMode;
+        if (tableMode) {
+          stand.setAttribute('rotation', '0 0 0');
+          stand.setAttribute('position', '0 0 0');
+          this.textContent = 'Marker on a screen? Tap here';
+        } else {
+          stand.setAttribute('rotation', '-90 0 0');
+          stand.setAttribute('position', '0 0.3 0.4');
+          this.textContent = 'Marker on table? Tap here';
+        }
+      });
+    </script>
+
+    <a-scene embedded
+             arjs="sourceType: webcam; debugUIEnabled: false;"
+             vr-mode-ui="enabled: false"
+             renderer="logarithmicDepthBuffer: true; antialias: true;">
+
+      <a-marker preset="hiro">
+        <!-- Stand: turns the dragon upright and facing you.
+             Screen mode (default): marker shown on a phone/laptop/wall.
+             Table mode: marker lying flat on a table. -->
+        <a-entity id="stand" rotation="-90 0 0" position="0 0.3 0.4">
+        <!-- Whole dragon: hovers up and down -->
+        <a-entity id="dragon" scale="0.5 0.5 0.5"
+                  animation="property: position; from: 0 0 0; to: 0 0.12 0; dir: alternate; loop: true; dur: 1400; easing: easeInOutSine">
+
+          <!-- Body and belly -->
+          <a-sphere radius="0.5" scale="0.8 0.7 1.2" position="0 0.8 0" color="#2e7d32"></a-sphere>
+          <a-sphere radius="0.45" scale="0.65 0.55 1.05" position="0 0.72 0.1" color="#d4c26a"></a-sphere>
+
+          <!-- Spikes on the back -->
+          <a-cone radius-bottom="0.07" radius-top="0" height="0.2" position="0 1.17 0.25" color="#1b5e20"></a-cone>
+          <a-cone radius-bottom="0.08" radius-top="0" height="0.24" position="0 1.2 0" color="#1b5e20"></a-cone>
+          <a-cone radius-bottom="0.07" radius-top="0" height="0.2" position="0 1.15 -0.25" color="#1b5e20"></a-cone>
+
+          <!-- Neck -->
+          <a-cylinder radius="0.17" height="0.75" position="0 1.3 0.48" rotation="35 0 0" color="#2e7d32"></a-cylinder>
+
+          <!-- Head: nods while breathing -->
+          <a-entity position="0 1.65 0.75"
+                    animation="property: rotation; from: -8 0 0; to: 8 0 0; dir: alternate; loop: true; dur: 1900; easing: easeInOutSine">
+            <a-box width="0.42" height="0.36" depth="0.46" color="#2e7d32"></a-box>
+            <a-box width="0.32" height="0.22" depth="0.36" position="0 -0.06 0.36" color="#388e3c"></a-box>
+            <!-- Nostrils -->
+            <a-sphere radius="0.025" position="-0.07 0.03 0.54" color="#111"></a-sphere>
+            <a-sphere radius="0.025" position="0.07 0.03 0.54" color="#111"></a-sphere>
+            <!-- Glowing eyes -->
+            <a-sphere radius="0.06" position="-0.15 0.08 0.18"
+                      material="color: #ffeb3b; emissive: #ffcc00; emissiveIntensity: 0.9"></a-sphere>
+            <a-sphere radius="0.06" position="0.15 0.08 0.18"
+                      material="color: #ffeb3b; emissive: #ffcc00; emissiveIntensity: 0.9"></a-sphere>
+            <a-sphere radius="0.025" position="-0.17 0.08 0.23" color="#111"></a-sphere>
+            <a-sphere radius="0.025" position="0.17 0.08 0.23" color="#111"></a-sphere>
+            <!-- Horns -->
+            <a-cone radius-bottom="0.05" radius-top="0" height="0.32" position="-0.13 0.28 -0.15" rotation="-35 0 -10" color="#efebe9"></a-cone>
+            <a-cone radius-bottom="0.05" radius-top="0" height="0.32" position="0.13 0.28 -0.15" rotation="-35 0 10" color="#efebe9"></a-cone>
+
+            <!-- Fire comes out of the mouth -->
+            <a-entity position="0 -0.08 0.56" fire-breath>
+              <a-entity light="type: point; color: #ff6a00; intensity: 0; distance: 3"></a-entity>
+            </a-entity>
+          </a-entity>
+
+          <!-- Left wing (flaps) -->
+          <a-entity position="-0.3 1.05 0"
+                    animation="property: rotation; from: 0 0 -25; to: 0 0 30; dir: alternate; loop: true; dur: 700; easing: easeInOutSine">
+            <a-triangle vertex-a="0 0 0.25" vertex-b="-1.2 0.45 -0.2" vertex-c="-0.6 -0.05 -0.65"
+                        material="color: #66bb6a; side: double; opacity: 0.9; transparent: true"></a-triangle>
+          </a-entity>
+
+          <!-- Right wing (flaps) -->
+          <a-entity position="0.3 1.05 0"
+                    animation="property: rotation; from: 0 0 25; to: 0 0 -30; dir: alternate; loop: true; dur: 700; easing: easeInOutSine">
+            <a-triangle vertex-a="0 0 0.25" vertex-b="1.2 0.45 -0.2" vertex-c="0.6 -0.05 -0.65"
+                        material="color: #66bb6a; side: double; opacity: 0.9; transparent: true"></a-triangle>
+          </a-entity>
+
+          <!-- Tail (swishes) -->
+          <a-entity position="0 0.7 -0.55"
+                    animation="property: rotation; from: 0 -20 0; to: 0 20 0; dir: alternate; loop: true; dur: 1600; easing: easeInOutSine">
+            <a-cone radius-bottom="0.2" radius-top="0.05" height="0.9" position="0 -0.1 -0.4" rotation="-75 0 0" color="#2e7d32"></a-cone>
+            <a-cone radius-bottom="0.12" radius-top="0" height="0.25" position="0 -0.2 -0.9" rotation="-90 0 0" color="#1b5e20"></a-cone>
+          </a-entity>
+
+          <!-- Legs -->
+          <a-cylinder radius="0.08" height="0.45" position="-0.25 0.25 0.3" color="#1b5e20"></a-cylinder>
+          <a-cylinder radius="0.08" height="0.45" position="0.25 0.25 0.3" color="#1b5e20"></a-cylinder>
+          <a-cylinder radius="0.08" height="0.45" position="-0.25 0.25 -0.3" color="#1b5e20"></a-cylinder>
+          <a-cylinder radius="0.08" height="0.45" position="0.25 0.25 -0.3" color="#1b5e20"></a-cylinder>
+        </a-entity>
+        </a-entity>
+      </a-marker>
+
+      <a-entity camera></a-entity>
+    </a-scene>
+  </body>
+</html>
