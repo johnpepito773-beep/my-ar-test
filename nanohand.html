@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+  <title>Nano Armor Hand</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #05070a; overflow: hidden; font-family: system-ui, sans-serif; }
+    canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
+    video { display: none; }
+    .status {
+      position: fixed; top: 16px; left: 50%; transform: translateX(-50%); z-index: 5;
+      background: rgba(5, 12, 18, 0.75); color: #bff9ff; border: 1px solid rgba(63, 243, 255, 0.5);
+      padding: 8px 16px; border-radius: 20px; font-size: 14px; letter-spacing: 0.5px;
+      white-space: nowrap; pointer-events: none;
+    }
+    .bar { position: fixed; bottom: 18px; left: 0; right: 0; z-index: 5; display: flex; justify-content: center; gap: 10px; }
+    .bar button, #startBtn {
+      background: rgba(10, 30, 40, 0.85); color: #3ff3ff; border: 1px solid #3ff3ff;
+      font-size: 15px; font-weight: 600; padding: 10px 16px; border-radius: 22px;
+    }
+    #start {
+      position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 18px; color: #d9f7ff; text-align: center;
+      background: radial-gradient(circle at 50% 40%, #0d2530, #05070a 70%); padding: 24px;
+    }
+    #start h1 { margin: 0; font-size: 26px; letter-spacing: 2px; color: #3ff3ff; }
+    #start p { margin: 0; max-width: 320px; line-height: 1.5; color: #9fc4cc; }
+    #startBtn { font-size: 18px; padding: 14px 28px; }
+  </style>
+</head>
+<body>
+  <div id="start">
+    <h1>NANO ARMOR</h1>
+    <p>Show your open hand to the camera. Once your hand is detected, nano armor will slowly cover it from your wrist to your fingertips.</p>
+    <button id="startBtn">Start camera</button>
+    <p id="loadMsg" style="font-size:13px"></p>
+  </div>
+
+  <canvas id="c"></canvas>
+  <video id="v" playsinline muted></video>
+  <div class="status" id="status">Loading hand tracking…</div>
+  <div class="bar">
+    <button id="flipBtn">Switch camera</button>
+    <button id="replayBtn">Replay</button>
+  </div>
+
+  <script type="module">
+    import { FilesetResolver, HandLandmarker } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.1.0/vision_bundle.mjs';
+
+    // ===== SETTINGS YOU CAN CHANGE =====
+    const DEPLOY_SECONDS = 4.0;      // how long the armor takes to cover your hand
+    const RETRACT_SECONDS = 1.2;     // how fast it disappears when your hand leaves
+    const COLORS = {
+      glow:  '#3ff3ff',   // energy color (seams, particles)
+      dark:  '#161b21',   // darkest metal
+      mid:   '#5f6b78',   // middle metal
+      light: '#dfe7ef'    // shiny metal highlight
+    };
+
+    // ===== SETUP =====
+    const demo = new URLSearchParams(location.search).has('demo');
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+    const video = document.getElementById('v');
+    const statusEl = document.getElementById('status');
+    let W = 0, H = 0, DPR = 1;
+    let facing = 'user';
+    let landmarker = null;
+    let lastVideoTime = -1;
+    const slots = {};          // one per detected hand ("Left" / "Right")
+    const particles = [];
+
+    function resize() {
+      DPR = Math.min(window.devicePixelRatio || 1, 2);
+      W = canvas.width = Math.round(innerWidth * DPR);
+      H = canvas.height = Math.round(innerHeight * DPR);
+    }
+    addEventListener('resize', resize);
+    resize();
+
+    // ===== SMALL MATH HELPERS =====
+    const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+    const lerp = (a, b, t) => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+    const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+    const seg = (p, start, dur) => clamp((p - start) / dur, 0, 1);
+
+    // Hand landmark numbers: 0 = wrist, 1-4 thumb, 5-8 index, 9-12 middle, 13-16 ring, 17-20 pinky
+    const FINGERS = [
+      { pts: [1, 2, 3, 4],     start: 0.28, width: 0.21 },  // thumb
+      { pts: [5, 6, 7, 8],     start: 0.38, width: 0.17 },  // index
+      { pts: [9, 10, 11, 12],  start: 0.38, width: 0.18 },  // middle
+      { pts: [13, 14, 15, 16], start: 0.40, width: 0.165 }, // ring
+      { pts: [17, 18, 19, 20], start: 0.42, width: 0.14 }   // pinky
+    ];
+    const SEG_DUR = 0.18, SEG_STEP = 0.16;
+    const PALM = [0, 1, 5, 9, 13, 17];
+    const BONES = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],
+                   [9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+
+    // ===== PARTICLES (the "nanobots") =====
+    function spawn(x, y, spread, n, speed = 60) {
+      for (let i = 0; i < n && particles.length < 900; i++) {
+        const a = Math.random() * Math.PI * 2;
+        const s = Math.random() * speed * DPR;
+        particles.push({
+          x: x + (Math.random() - 0.5) * spread, y: y + (Math.random() - 0.5) * spread,
+          vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+          life: 0, max: 0.3 + Math.random() * 0.5, size: (0.8 + Math.random() * 1.8) * DPR,
+          white: Math.random() < 0.3
+        });
+      }
+    }
+    function drawParticles(dt) {
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const q = particles[i];
+        q.life += dt;
+        if (q.life >= q.max) { particles.splice(i, 1); continue; }
+        q.x += q.vx * dt; q.y += q.vy * dt;
+        q.vx *= 0.94; q.vy *= 0.94;
+        ctx.globalAlpha = 1 - q.life / q.max;
+        ctx.fillStyle = q.white ? '#ffffff' : COLORS.glow;
+        ctx.fillRect(q.x, q.y, q.size, q.size);
+      }
+      ctx.restore();
+    }
+
+    // ===== ARMOR DRAWING =====
+    // One armor plate along a bone, from A to B. f = how much of it is covered (0..1).
+    function drawPlate(A, B, w, f, t) {
+      if (f <= 0) return;
+      const E = lerp(A, B, f);
+      const len = dist(A, E);
+      const dx = (B.x - A.x) / (dist(A, B) || 1), dy = (B.y - A.y) / (dist(A, B) || 1);
+      const nx = -dy, ny = dx;
+
+      ctx.save();
+      ctx.lineCap = 'round';
+      if (len > 0.5) {
+        // dark outline
+        ctx.strokeStyle = '#06080a';
+        ctx.lineWidth = w * 1.14;
+        ctx.beginPath(); ctx.moveTo(A.x, A.y); ctx.lineTo(E.x, E.y); ctx.stroke();
+        // brushed-metal body
+        const g = ctx.createLinearGradient(A.x + nx * w / 2, A.y + ny * w / 2, A.x - nx * w / 2, A.y - ny * w / 2);
+        g.addColorStop(0, COLORS.dark);
+        g.addColorStop(0.3, COLORS.mid);
+        g.addColorStop(0.48, COLORS.light);
+        g.addColorStop(0.62, COLORS.mid);
+        g.addColorStop(1, COLORS.dark);
+        ctx.strokeStyle = g;
+        ctx.lineWidth = w;
+        ctx.beginPath(); ctx.moveTo(A.x, A.y); ctx.lineTo(E.x, E.y); ctx.stroke();
+        // center seam
+        ctx.strokeStyle = 'rgba(10,14,18,0.75)';
+        ctx.lineWidth = Math.max(1, w * 0.07);
+        ctx.beginPath(); ctx.moveTo(A.x, A.y); ctx.lineTo(E.x, E.y); ctx.stroke();
+        // energy line once the plate is complete
+        if (f >= 1) {
+          ctx.globalAlpha = 0.45 + 0.35 * Math.sin(t * 0.004 + A.x * 0.01);
+          ctx.shadowColor = COLORS.glow; ctx.shadowBlur = 8 * DPR;
+          ctx.strokeStyle = COLORS.glow;
+          ctx.lineWidth = Math.max(1, w * 0.06);
+          ctx.beginPath();
+          ctx.moveTo(A.x + nx * w * 0.22, A.y + ny * w * 0.22);
+          ctx.lineTo(E.x + nx * w * 0.22, E.y + ny * w * 0.22);
+          ctx.stroke();
+        }
+      }
+      // glowing "building edge" while this plate is still forming
+      if (f < 1) {
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.shadowColor = COLORS.glow; ctx.shadowBlur = 18 * DPR;
+        ctx.strokeStyle = COLORS.glow;
+        ctx.lineWidth = 2 * DPR;
+        ctx.beginPath();
+        ctx.moveTo(E.x + nx * w * 0.6, E.y + ny * w * 0.6);
+        ctx.lineTo(E.x - nx * w * 0.6, E.y - ny * w * 0.6);
+        ctx.stroke();
+        spawn(E.x, E.y, w, 3);
+      }
+      ctx.restore();
+    }
+
+    // Knuckle joint cap
+    function drawJoint(P, w) {
+      ctx.save();
+      ctx.fillStyle = '#12161b';
+      ctx.beginPath(); ctx.arc(P.x, P.y, w * 0.34, 0, Math.PI * 2); ctx.fill();
+      ctx.shadowColor = COLORS.glow; ctx.shadowBlur = 6 * DPR;
+      ctx.strokeStyle = COLORS.glow; ctx.globalAlpha = 0.8;
+      ctx.lineWidth = Math.max(1, w * 0.07);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawHexagon(c, r) {
+      ctx.beginPath();
+      for (let i = 0; i < 6; i++) {
+        const a = Math.PI / 6 + i * Math.PI / 3;
+        const x = c.x + Math.cos(a) * r, y = c.y + Math.sin(a) * r;
+        i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+      }
+      ctx.closePath();
+    }
+
+    function drawArmor(P, slot, t) {
+      const p = slot.p;
+      const scale = dist(P[0], P[9]);
+      if (scale < 10) return;
+
+      // 1) Scanning skeleton while the armor is still forming
+      if (p < 1) {
+        ctx.save();
+        ctx.globalAlpha = 0.6 * (1 - p);
+        ctx.strokeStyle = COLORS.glow; ctx.lineWidth = 1.5 * DPR;
+        ctx.shadowColor = COLORS.glow; ctx.shadowBlur = 6 * DPR;
+        ctx.beginPath();
+        BONES.forEach(([a, b]) => { ctx.moveTo(P[a].x, P[a].y); ctx.lineTo(P[b].x, P[b].y); });
+        ctx.stroke();
+        ctx.fillStyle = '#ffffff';
+        P.forEach(q => { ctx.beginPath(); ctx.arc(q.x, q.y, 2.5 * DPR, 0, Math.PI * 2); ctx.fill(); });
+        ctx.restore();
+      }
+
+      // Nanobots gathering at the wrist before the armor starts
+      if (p > 0 && p < 0.18) spawn(P[0].x, P[0].y, scale * 0.5, 6, 90);
+
+      // 2) Wrist cuff (grows toward the forearm)
+      const back = { x: P[0].x - P[9].x, y: P[0].y - P[9].y };
+      const bl = Math.hypot(back.x, back.y) || 1;
+      const cuffEnd = { x: P[0].x + back.x / bl * scale * 0.5, y: P[0].y + back.y / bl * scale * 0.5 };
+      drawPlate(P[0], cuffEnd, scale * 0.62, seg(p, 0.0, 0.16), t);
+
+      // 3) Palm / back of hand plate, spreading out from the wrist
+      const fp = seg(p, 0.08, 0.3);
+      if (fp > 0) {
+        const center = { x: 0, y: 0 };
+        PALM.forEach(i => { center.x += P[i].x / PALM.length; center.y += P[i].y / PALM.length; });
+        const poly = PALM.map(i => lerp(center, P[i], 1.12));
+        const R = fp * scale * 1.35;
+
+        ctx.save();
+        ctx.beginPath();
+        poly.forEach((q, i) => i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y));
+        ctx.closePath();
+        ctx.clip();
+        ctx.beginPath(); ctx.arc(P[0].x, P[0].y, R, 0, Math.PI * 2); ctx.clip();
+
+        const g = ctx.createRadialGradient(center.x - scale * 0.15, center.y - scale * 0.2, scale * 0.05, center.x, center.y, scale * 0.9);
+        g.addColorStop(0, COLORS.light);
+        g.addColorStop(0.45, COLORS.mid);
+        g.addColorStop(1, COLORS.dark);
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, W, H);
+
+        // panel lines
+        ctx.strokeStyle = 'rgba(8,11,14,0.8)';
+        ctx.lineWidth = Math.max(1, scale * 0.025);
+        ctx.beginPath();
+        [5, 9, 13, 17].forEach(i => { ctx.moveTo(P[0].x, P[0].y); ctx.lineTo(lerp(P[0], P[i], 0.85).x, lerp(P[0], P[i], 0.85).y); });
+        ctx.stroke();
+        ctx.restore();
+
+        // glowing outline + spreading edge
+        ctx.save();
+        ctx.shadowColor = COLORS.glow; ctx.shadowBlur = 10 * DPR;
+        ctx.strokeStyle = COLORS.glow; ctx.globalAlpha = fp < 1 ? 1 : 0.55;
+        ctx.lineWidth = 1.6 * DPR;
+        if (fp < 1) {
+          ctx.beginPath();
+          poly.forEach((q, i) => i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y));
+          ctx.closePath(); ctx.clip();
+          ctx.beginPath(); ctx.arc(P[0].x, P[0].y, R, 0, Math.PI * 2); ctx.stroke();
+          const a = Math.random() * Math.PI * 2;
+          spawn(P[0].x + Math.cos(a) * R, P[0].y + Math.sin(a) * R, scale * 0.15, 4);
+        } else {
+          ctx.beginPath();
+          poly.forEach((q, i) => i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y));
+          ctx.closePath(); ctx.stroke();
+        }
+        ctx.restore();
+
+        // Hexagonal energy core in the middle of the hand
+        if (fp >= 1) {
+          const core = lerp(center, P[9], 0.15);
+          const pulse = 0.75 + 0.25 * Math.sin(t * 0.006);
+          const r = scale * 0.14;
+          ctx.save();
+          ctx.globalCompositeOperation = 'lighter';
+          const cg = ctx.createRadialGradient(core.x, core.y, 0, core.x, core.y, r * 2.2);
+          cg.addColorStop(0, 'rgba(255,255,255,' + pulse + ')');
+          cg.addColorStop(0.35, 'rgba(63,243,255,' + 0.8 * pulse + ')');
+          cg.addColorStop(1, 'rgba(63,243,255,0)');
+          ctx.fillStyle = cg;
+          ctx.beginPath(); ctx.arc(core.x, core.y, r * 2.2, 0, Math.PI * 2); ctx.fill();
+          ctx.restore();
+          ctx.save();
+          ctx.strokeStyle = COLORS.glow; ctx.lineWidth = Math.max(1, scale * 0.025);
+          ctx.shadowColor = COLORS.glow; ctx.shadowBlur = 10 * DPR;
+          drawHexagon(core, r); ctx.stroke();
+          ctx.restore();
+        }
+      }
+
+      // 4) Fingers, one segment at a time from the knuckles to the fingertips
+      FINGERS.forEach(fg => {
+        const w = scale * fg.width;
+        for (let k = 0; k < 3; k++) {
+          const a = P[fg.pts[k]], b = P[fg.pts[k + 1]];
+          const f = seg(p, fg.start + k * SEG_STEP, SEG_DUR);
+          const taper = 1 - k * 0.08;
+          drawPlate(a, b, w * taper, f, t);
+        }
+        for (let k = 0; k < 3; k++) {
+          if (seg(p, fg.start + k * SEG_STEP, SEG_DUR) > 0.3) drawJoint(P[fg.pts[k]], w * (1 - k * 0.08));
+        }
+      });
+
+      // 5) Completion flash
+      if (slot.doneAt) {
+        const age = (t - slot.doneAt) / 700;
+        if (age < 1) {
+          const c = lerp(P[0], P[9], 0.55);
+          ctx.save();
+          ctx.globalAlpha = 1 - age;
+          ctx.strokeStyle = COLORS.glow; ctx.lineWidth = 3 * DPR;
+          ctx.shadowColor = COLORS.glow; ctx.shadowBlur = 20 * DPR;
+          ctx.beginPath(); ctx.arc(c.x, c.y, scale * (0.3 + age * 1.6), 0, Math.PI * 2); ctx.stroke();
+          ctx.restore();
+        }
+      }
+    }
+
+    // ===== CAMERA VIDEO + LANDMARK MAPPING =====
+    let view = { s: 1, ox: 0, oy: 0, dw: 0, dh: 0 };
+    function drawVideo() {
+      const vw = video.videoWidth, vh = video.videoHeight;
+      if (!vw) return false;
+      const s = Math.max(W / vw, H / vh);
+      view = { s, dw: vw * s, dh: vh * s, ox: (W - vw * s) / 2, oy: (H - vh * s) / 2 };
+      ctx.save();
+      if (facing === 'user') { ctx.translate(W, 0); ctx.scale(-1, 1); }
+      ctx.drawImage(video, view.ox, view.oy, view.dw, view.dh);
+      ctx.restore();
+      return true;
+    }
+    function toScreen(lm) {
+      let x = view.ox + lm.x * view.dw;
+      const y = view.oy + lm.y * view.dh;
+      if (facing === 'user') x = W - x;
+      return { x, y };
+    }
+
+    // ===== DEMO HAND (open with ?demo to preview without a camera) =====
+    const DEMO = [[.50,.86],[.40,.79],[.33,.71],[.28,.63],[.24,.56],[.42,.58],[.40,.45],[.39,.37],[.385,.30],
+                  [.50,.56],[.50,.42],[.50,.33],[.50,.26],[.57,.58],[.59,.46],[.60,.38],[.61,.32],
+                  [.63,.62],[.66,.53],[.68,.47],[.69,.42]];
+    function demoHand(t) {
+      const size = Math.min(W, H) * 1.1;
+      const ox = (W - size) / 2, oy = (H - size) / 2 + size * 0.03;
+      const wob = Math.sin(t * 0.0012) * 0.01;
+      return DEMO.map(([x, y], i) => ({ x: ox + (x + wob * (i > 4 ? 1 : 0.5)) * size, y: oy + (y + Math.cos(t * 0.001 + i) * 0.002) * size }));
+    }
+
+    // ===== MAIN LOOP =====
+    let prev = performance.now();
+    function loop(now) {
+      const dt = Math.min((now - prev) / 1000, 0.05);
+      prev = now;
+      ctx.clearRect(0, 0, W, H);
+
+      const seen = {};
+      if (demo) {
+        const g = ctx.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, Math.max(W, H) * 0.7);
+        g.addColorStop(0, '#13242c'); g.addColorStop(1, '#05070a');
+        ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+        seen.Demo = demoHand(now);
+      } else if (drawVideo() && landmarker && video.currentTime !== lastVideoTime) {
+        lastVideoTime = video.currentTime;
+        const res = landmarker.detectForVideo(video, now);
+        (res.landmarks || []).forEach((hand, i) => {
+          const label = (res.handedness && res.handedness[i] && res.handedness[i][0]) ? res.handedness[i][0].categoryName : 'Hand' + i;
+          seen[label] = hand.map(toScreen);
+        });
+        lastSeen = seen;
+      } else if (!demo) {
+        Object.assign(seen, lastSeen);
+      }
+
+      let best = 0, any = false;
+      Object.keys(seen).forEach(key => {
+        const pts = seen[key];
+        const slot = slots[key] || (slots[key] = { lm: pts.map(q => ({ ...q })), p: 0, doneAt: 0 });
+        // smooth out jitter
+        slot.lm = slot.lm.map((q, i) => lerp(q, pts[i], 0.55));
+        slot.last = now;
+        slot.p = Math.min(1, slot.p + dt / DEPLOY_SECONDS);
+        if (slot.p >= 1 && !slot.doneAt) { slot.doneAt = now; spawn(slot.lm[9].x, slot.lm[9].y, 40 * DPR, 80, 260); }
+        drawArmor(slot.lm, slot, now);
+        best = Math.max(best, slot.p); any = true;
+      });
+
+      // Hands that left the view: armor retracts
+      Object.keys(slots).forEach(key => {
+        if (seen[key]) return;
+        const slot = slots[key];
+        if (now - slot.last > 250) {
+          slot.p = Math.max(0, slot.p - dt / RETRACT_SECONDS);
+          if (slot.p < 1) slot.doneAt = 0;
+        }
+      });
+
+      if (demo && best >= 1 && now - slots.Demo.doneAt > 3500) { slots.Demo.p = 0; slots.Demo.doneAt = 0; }
+
+      drawParticles(dt);
+
+      if (!landmarker && !demo) statusEl.textContent = 'Loading hand tracking…';
+      else if (!any) statusEl.textContent = '✋ Show your open hand to the camera';
+      else if (best < 1) statusEl.textContent = 'Deploying nano armor… ' + Math.round(best * 100) + '%';
+      else statusEl.textContent = '⚡ NANO ARMOR ONLINE';
+
+      requestAnimationFrame(loop);
+    }
+    let lastSeen = {};
+
+    // ===== START =====
+    async function loadModel() {
+      const files = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.1.0/wasm');
+      const opts = (delegate) => ({
+        baseOptions: {
+          modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+          delegate
+        },
+        runningMode: 'VIDEO',
+        numHands: 2,
+        minHandDetectionConfidence: 0.5,
+        minHandPresenceConfidence: 0.5,
+        minTrackingConfidence: 0.5
+      });
+      try { landmarker = await HandLandmarker.createFromOptions(files, opts('GPU')); }
+      catch (e) { landmarker = await HandLandmarker.createFromOptions(files, opts('CPU')); }
+    }
+
+    async function startCamera() {
+      if (video.srcObject) video.srcObject.getTracks().forEach(tr => tr.stop());
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false
+      });
+      video.srcObject = stream;
+      await video.play();
+      lastVideoTime = -1;
+    }
+
+    const modelPromise = demo ? Promise.resolve() : loadModel().catch(err => {
+      statusEl.textContent = 'Could not load hand tracking. Check your internet and reload.';
+      console.error(err);
+    });
+
+    document.getElementById('startBtn').addEventListener('click', async () => {
+      const msg = document.getElementById('loadMsg');
+      try {
+        if (!demo) {
+          msg.textContent = 'Starting camera…';
+          await startCamera();
+          msg.textContent = 'Loading hand tracking…';
+          await modelPromise;
+        }
+        document.getElementById('start').style.display = 'none';
+      } catch (err) {
+        msg.textContent = 'Camera error: ' + err.message + '. Allow camera access and reload.';
+      }
+    });
+
+    document.getElementById('flipBtn').addEventListener('click', async () => {
+      if (demo) return;
+      facing = facing === 'user' ? 'environment' : 'user';
+      Object.keys(slots).forEach(k => delete slots[k]);
+      lastSeen = {};
+      try { await startCamera(); } catch (e) { statusEl.textContent = 'Could not switch camera'; }
+    });
+
+    document.getElementById('replayBtn').addEventListener('click', () => {
+      Object.keys(slots).forEach(k => { slots[k].p = 0; slots[k].doneAt = 0; });
+    });
+
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
