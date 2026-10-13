@@ -1,0 +1,1198 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+  <title>Tactical Suit</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #050606; overflow: hidden; font-family: system-ui, sans-serif; }
+    canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; touch-action: none; }
+    video { display: none; }
+    .status {
+      position: fixed; top: 14px; left: 50%; transform: translateX(-50%); z-index: 5;
+      background: rgba(10, 11, 13, 0.78); color: #f2f4f5; border: 1px solid rgba(255,255,255,0.4);
+      padding: 8px 16px; border-radius: 20px; font-size: 14px; letter-spacing: 0.5px;
+      white-space: nowrap; pointer-events: none;
+    }
+    .legend {
+      position: fixed; bottom: 64px; left: 0; right: 0; z-index: 5; text-align: center;
+      color: rgba(240,244,247,0.85); font-size: 12px; letter-spacing: 0.3px; pointer-events: none;
+      text-shadow: 0 1px 3px #000;
+    }
+    .bar { position: fixed; bottom: 14px; left: 0; right: 0; z-index: 5; display: flex; justify-content: center; gap: 8px; }
+    .bar button, #startBtn {
+      background: rgba(12, 13, 15, 0.85); color: #f2f4f5; border: 1px solid #f2f4f5;
+      font-size: 14px; font-weight: 600; padding: 9px 14px; border-radius: 20px;
+    }
+    #start {
+      position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 16px; color: #e9ecee; text-align: center;
+      background: radial-gradient(circle at 50% 40%, #24272b, #050606 70%); padding: 24px;
+    }
+    #start h1 { margin: 0; font-size: 26px; letter-spacing: 3px; color: #fff; }
+    #start p { margin: 0; max-width: 340px; line-height: 1.5; color: #a9adb1; }
+    #start ul { margin: 0; padding: 0; list-style: none; color: #d5d9dc; line-height: 1.9; font-size: 15px; text-align: left; }
+    #startBtn { font-size: 18px; padding: 14px 28px; }
+  </style>
+</head>
+<body>
+  <div id="start">
+    <h1>TACTICAL SUIT</h1>
+    <ul>
+      <li>✋ <b>Open hand</b> — activate the suit</li>
+      <li>✊ <b>Make a fist</b> — switch Combat / Defense mode</li>
+      <li>🖐 <b>Palm to camera</b> — charge &amp; fire a palm blast</li>
+      <li>☝️ <b>Point one finger</b> — open the holo menu, hover a button to select</li>
+    </ul>
+    <p>Turn your sound on for the full effect.</p>
+    <button id="startBtn">Start camera</button>
+    <p id="loadMsg" style="font-size:13px"></p>
+  </div>
+
+  <canvas id="c"></canvas>
+  <video id="v" playsinline muted></video>
+  <div class="status" id="status">Loading hand tracking…</div>
+  <div class="legend">✋ Activate · ✊ Mode · 🖐 Palm blast · ☝️ Menu</div>
+  <div class="bar">
+    <button id="flipBtn">Switch camera</button>
+    <button id="soundBtn">🔊 Sound</button>
+    <button id="palmBtn">Palm ⇄</button>
+  </div>
+
+  <script type="module">
+    import { FilesetResolver, HandLandmarker } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.1.0/vision_bundle.mjs';
+
+    // =====================================================================
+    // SETTINGS YOU CAN CHANGE
+    // =====================================================================
+    const DEPLOY_SECONDS  = 4.0;   // how long the armor takes to cover your hand
+    const RETRACT_SECONDS = 1.2;   // how fast it disappears when your hand leaves
+    const CHARGE_SECONDS  = 0.7;   // palm-blast charge time
+    const BLAST_COOLDOWN  = 0.9;   // seconds between blasts
+    const MENU_DWELL      = 0.9;   // seconds to hover a menu button to select it
+    const COLORS = {
+      glow:      '#eef7ff',  // white light (edges, particles)
+      accent:    '#ff8a1f',  // amber status lights
+      blast:     '#4fb6ff',  // palm blast energy (blue)
+      holo:      '#8fd6ff',  // holographic menu color
+      combat:    '#ff3b2f',  // combat mode color
+      defense:   '#4fb6ff',  // defense mode color
+      white:     '#f1f1ee',
+      whiteMid:  '#c4c7c9',
+      whiteEdge: '#7d8186',
+      blackHi:   '#2e3135',
+      blackMid:  '#141619'
+    };
+
+    // =====================================================================
+    // SETUP
+    // =====================================================================
+    const demo = new URLSearchParams(location.search).has('demo');
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+    const video = document.getElementById('v');
+    const statusEl = document.getElementById('status');
+    let W = 0, H = 0, DPR = 1;
+    let facing = 'user';
+    let landmarker = null;
+    let lastVideoTime = -1;
+    let palmFlip = false;
+    const slots = {};
+    const particles = [];
+    const blasts = [];
+
+    // Suit-wide state
+    const suit = {
+      mode: 'standard',     // 'standard' | 'combat' | 'defense'
+      modeAt: 0,
+      power: 100,
+      temp: 31,
+      blastsFired: 0,
+      statusOn: false,
+      scanAt: 0,
+      toast: '', toastAt: 0
+    };
+    const menu = { open: false, x: 0, y: 0, w: 0, h: 0, openedAt: 0, lastActive: 0, hover: -1, hoverSince: 0, buttons: [] };
+
+    function resize() {
+      DPR = Math.min(window.devicePixelRatio || 1, 2);
+      W = canvas.width = Math.round(innerWidth * DPR);
+      H = canvas.height = Math.round(innerHeight * DPR);
+    }
+    addEventListener('resize', resize);
+    resize();
+
+    // =====================================================================
+    // SOUND EFFECTS (made with code, no files needed)
+    // =====================================================================
+    let actx = null, soundOn = true;
+    function audioInit() {
+      try { actx = actx || new (window.AudioContext || window.webkitAudioContext)(); actx.resume(); } catch (e) { actx = null; }
+    }
+    function tone(freq, dur, opts = {}) {
+      if (!actx || !soundOn) return;
+      const t0 = actx.currentTime + (opts.delay || 0);
+      const o = actx.createOscillator(), g = actx.createGain();
+      o.type = opts.type || 'sine';
+      o.frequency.setValueAtTime(freq, t0);
+      if (opts.to) o.frequency.exponentialRampToValueAtTime(opts.to, t0 + dur);
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(opts.vol || 0.08, t0 + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      o.connect(g).connect(actx.destination);
+      o.start(t0); o.stop(t0 + dur + 0.05);
+    }
+    function noise(dur, opts = {}) {
+      if (!actx || !soundOn) return;
+      const t0 = actx.currentTime + (opts.delay || 0);
+      const buf = actx.createBuffer(1, Math.ceil(actx.sampleRate * dur), actx.sampleRate);
+      const d = buf.getChannelData(0);
+      for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+      const src = actx.createBufferSource(); src.buffer = buf;
+      const f = actx.createBiquadFilter(); f.type = opts.filter || 'lowpass';
+      f.frequency.setValueAtTime(opts.from || 3000, t0);
+      f.frequency.exponentialRampToValueAtTime(opts.to || 200, t0 + dur);
+      const g = actx.createGain();
+      g.gain.setValueAtTime(opts.vol || 0.3, t0);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      src.connect(f).connect(g).connect(actx.destination);
+      src.start(t0);
+    }
+    const sfx = {
+      deploy: () => { tone(180, 0.9, { to: 700, type: 'sawtooth', vol: 0.035 }); noise(0.9, { from: 6000, to: 1500, vol: 0.05, filter: 'bandpass' }); },
+      online: () => { tone(660, 0.12, { type: 'square', vol: 0.04 }); tone(990, 0.25, { type: 'square', vol: 0.04, delay: 0.12 }); },
+      mode:   (m) => { noise(0.12, { from: 900, to: 120, vol: 0.5 }); tone(m === 'combat' ? 220 : 520, 0.1, { type: 'square', vol: 0.05, delay: 0.05 }); tone(m === 'combat' ? 160 : 780, 0.18, { type: 'square', vol: 0.05, delay: 0.16 }); },
+      charge: () => { tone(260, CHARGE_SECONDS, { to: 1400, type: 'triangle', vol: 0.05 }); },
+      blast:  () => { noise(0.55, { from: 2600, to: 120, vol: 0.6 }); tone(140, 0.45, { to: 38, type: 'sine', vol: 0.5 }); },
+      menu:   () => { tone(880, 0.1, { to: 1320, type: 'sine', vol: 0.06 }); },
+      hover:  () => { tone(1500, 0.03, { type: 'sine', vol: 0.025 }); },
+      select: () => { tone(1000, 0.06, { type: 'square', vol: 0.04 }); tone(1500, 0.09, { type: 'square', vol: 0.04, delay: 0.07 }); },
+      scan:   () => { tone(400, 1.1, { to: 1000, type: 'sine', vol: 0.04 }); }
+    };
+
+    // =====================================================================
+    // MATH HELPERS
+    // =====================================================================
+    const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+    const lerp = (a, b, t) => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+    const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+    const seg = (p, start, dur) => clamp((p - start) / dur, 0, 1);
+    function unitDir(A, B) { const d = dist(A, B) || 1; return { x: (B.x - A.x) / d, y: (B.y - A.y) / d }; }
+    function palmCenter(P) {
+      const c = { x: 0, y: 0 };
+      [0, 5, 9, 13, 17].forEach(i => { c.x += P[i].x / 5; c.y += P[i].y / 5; });
+      return lerp(c, P[9], 0.1);
+    }
+
+    // Hand landmark numbers: 0 = wrist, 1-4 thumb, 5-8 index, 9-12 middle, 13-16 ring, 17-20 pinky
+    const FINGERS = [
+      { pts: [1, 2, 3, 4],     start: 0.28, width: 0.21 },
+      { pts: [5, 6, 7, 8],     start: 0.38, width: 0.17 },
+      { pts: [9, 10, 11, 12],  start: 0.38, width: 0.18 },
+      { pts: [13, 14, 15, 16], start: 0.40, width: 0.165 },
+      { pts: [17, 18, 19, 20], start: 0.42, width: 0.14 }
+    ];
+    const SEG_DUR = 0.18, SEG_STEP = 0.16;
+    const PALM = [0, 1, 5, 9, 13, 17];
+    const BONES = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],
+                   [9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+
+    // =====================================================================
+    // GESTURE RECOGNITION
+    // =====================================================================
+    // A finger counts as "extended" when its tip is clearly farther from the wrist than its middle joint.
+    function fingerExtended(P, tip, pip) { return dist(P[0], P[tip]) > dist(P[0], P[pip]) * 1.15; }
+    function classify(P) {
+      const ext = [[8, 6], [12, 10], [16, 14], [20, 18]].map(([t, p]) => fingerExtended(P, t, p));
+      const n = ext.filter(Boolean).length;
+      if (n >= 4) return 'open';
+      if (n === 0) return 'fist';
+      if (ext[0] && !ext[1] && !ext[2] && !ext[3]) return 'point';
+      return 'other';
+    }
+    // Which side of the hand faces the camera? Uses the hand's left/right label plus the
+    // order of the index and pinky knuckles in the (un-mirrored) camera image.
+    function isPalmFacing(raw, label) {
+      const ax = raw[5].x - raw[0].x, ay = raw[5].y - raw[0].y;
+      const bx = raw[17].x - raw[0].x, by = raw[17].y - raw[0].y;
+      const cross = ax * by - ay * bx;
+      const facing = label === 'Left' ? cross < 0 : cross > 0;
+      return palmFlip ? !facing : facing;
+    }
+
+    // =====================================================================
+    // PARTICLES
+    // =====================================================================
+    function spawn(x, y, spread, n, speed = 60, color = null) {
+      for (let i = 0; i < n && particles.length < 1100; i++) {
+        const a = Math.random() * Math.PI * 2;
+        const s = Math.random() * speed * DPR;
+        particles.push({
+          x: x + (Math.random() - 0.5) * spread, y: y + (Math.random() - 0.5) * spread,
+          vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+          life: 0, max: 0.3 + Math.random() * 0.5, size: (0.8 + Math.random() * 1.8) * DPR,
+          color: color || (Math.random() < 0.3 ? '#ffffff' : '#a7adb3')
+        });
+      }
+    }
+    function pull(x, y, n, radius, color) { // particles swirling inward (charging)
+      for (let i = 0; i < n && particles.length < 1100; i++) {
+        const a = Math.random() * Math.PI * 2, r = radius * (0.7 + Math.random() * 0.6);
+        const px = x + Math.cos(a) * r, py = y + Math.sin(a) * r;
+        particles.push({ x: px, y: py, vx: (x - px) * 3.2, vy: (y - py) * 3.2, life: 0, max: 0.28, size: (1 + Math.random() * 1.5) * DPR, color });
+      }
+    }
+    function drawParticles(dt) {
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const q = particles[i];
+        q.life += dt;
+        if (q.life >= q.max) { particles.splice(i, 1); continue; }
+        q.x += q.vx * dt; q.y += q.vy * dt;
+        q.vx *= 0.95; q.vy *= 0.95;
+        ctx.globalAlpha = 1 - q.life / q.max;
+        ctx.fillStyle = q.color;
+        ctx.fillRect(q.x, q.y, q.size, q.size);
+      }
+      ctx.restore();
+    }
+
+    // =====================================================================
+    // ARMOR DRAWING (tactical black & white)
+    // =====================================================================
+    function rectPath(A, B, w) {
+      const u = unitDir(A, B), n = { x: -u.y, y: u.x }, h = w / 2;
+      ctx.beginPath();
+      ctx.moveTo(A.x + n.x * h, A.y + n.y * h);
+      ctx.lineTo(B.x + n.x * h, B.y + n.y * h);
+      ctx.lineTo(B.x - n.x * h, B.y - n.y * h);
+      ctx.lineTo(A.x - n.x * h, A.y - n.y * h);
+      ctx.closePath();
+    }
+    function metalGradient(A, n, w, stops) {
+      const g = ctx.createLinearGradient(A.x + n.x * w / 2, A.y + n.y * w / 2, A.x - n.x * w / 2, A.y - n.y * w / 2);
+      stops.forEach(([o, c]) => g.addColorStop(o, c));
+      return g;
+    }
+    const BLACK_STOPS = [[0, '#050607'], [0.4, COLORS.blackHi], [0.55, COLORS.blackMid], [1, '#040505']];
+    const WHITE_STOPS = [[0, COLORS.whiteEdge], [0.3, COLORS.white], [0.5, '#ffffff'], [0.75, COLORS.whiteMid], [1, COLORS.whiteEdge]];
+    function modeColor() { return suit.mode === 'combat' ? COLORS.combat : suit.mode === 'defense' ? COLORS.defense : null; }
+
+    function drawPlate(A, B, w, f, t) {
+      if (f <= 0) return;
+      const E = lerp(A, B, f);
+      const len = dist(A, E);
+      const u = unitDir(A, B), n = { x: -u.y, y: u.x };
+      ctx.save();
+      if (len > 0.5) {
+        ctx.lineCap = 'round';
+        ctx.strokeStyle = '#000000';
+        ctx.lineWidth = w * 1.18;
+        ctx.beginPath(); ctx.moveTo(A.x, A.y); ctx.lineTo(E.x, E.y); ctx.stroke();
+        ctx.strokeStyle = metalGradient(A, n, w * 1.08, BLACK_STOPS);
+        ctx.lineWidth = w * 1.08;
+        ctx.beginPath(); ctx.moveTo(A.x, A.y); ctx.lineTo(E.x, E.y); ctx.stroke();
+
+        const s = lerp(A, E, 0.14), e = lerp(A, E, 0.86);
+        if (dist(s, e) > 2) {
+          const pw = w * 0.74;
+          rectPath(s, e, pw);
+          ctx.fillStyle = metalGradient(s, n, pw, WHITE_STOPS);
+          ctx.fill();
+          ctx.strokeStyle = '#0a0b0c';
+          ctx.lineWidth = Math.max(1, w * 0.05);
+          ctx.stroke();
+          const m = lerp(s, e, 0.55);
+          ctx.beginPath();
+          ctx.moveTo(m.x + n.x * pw / 2, m.y + n.y * pw / 2);
+          ctx.lineTo(m.x - n.x * pw / 2, m.y - n.y * pw / 2);
+          for (let r = 0; r < 2; r++) {
+            const g = lerp(s, e, 0.14 + r * 0.12);
+            ctx.moveTo(g.x + n.x * pw * 0.3, g.y + n.y * pw * 0.3);
+            ctx.lineTo(g.x - n.x * pw * 0.3, g.y - n.y * pw * 0.3);
+          }
+          ctx.lineWidth = Math.max(1, w * 0.045);
+          ctx.strokeStyle = 'rgba(10,11,12,0.85)';
+          ctx.stroke();
+        }
+        // mode energy stripes along each finished plate
+        const mc = modeColor();
+        if (mc && f >= 1) {
+          ctx.globalCompositeOperation = 'lighter';
+          ctx.shadowColor = mc; ctx.shadowBlur = 10 * DPR;
+          ctx.strokeStyle = mc;
+          ctx.globalAlpha = 0.65 + 0.3 * Math.sin(t * 0.006 + A.y * 0.02);
+          ctx.lineWidth = Math.max(1.2, w * 0.07);
+          [0.47, -0.47].forEach(k => {
+            ctx.beginPath();
+            ctx.moveTo(A.x + n.x * w * k, A.y + n.y * w * k);
+            ctx.lineTo(E.x + n.x * w * k, E.y + n.y * w * k);
+            ctx.stroke();
+          });
+        }
+      }
+      if (f < 1) {
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.globalAlpha = 1;
+        ctx.shadowColor = COLORS.glow; ctx.shadowBlur = 16 * DPR;
+        ctx.strokeStyle = COLORS.glow;
+        ctx.lineWidth = 2 * DPR;
+        ctx.beginPath();
+        ctx.moveTo(E.x + n.x * w * 0.62, E.y + n.y * w * 0.62);
+        ctx.lineTo(E.x - n.x * w * 0.62, E.y - n.y * w * 0.62);
+        ctx.stroke();
+        spawn(E.x, E.y, w, 3);
+      }
+      ctx.restore();
+    }
+
+    function drawGuard(P, toward, w) {
+      const u = unitDir(P, toward), n = { x: -u.y, y: u.x };
+      const A = { x: P.x - n.x * w * 0.72, y: P.y - n.y * w * 0.72 };
+      const B = { x: P.x + n.x * w * 0.72, y: P.y + n.y * w * 0.72 };
+      ctx.save();
+      rectPath(A, B, w * 0.78);
+      ctx.fillStyle = '#060708'; ctx.fill();
+      rectPath(lerp(A, B, 0.08), lerp(A, B, 0.92), w * 0.5);
+      ctx.fillStyle = metalGradient(P, u, w * 0.5, WHITE_STOPS); ctx.fill();
+      ctx.strokeStyle = '#0a0b0c'; ctx.lineWidth = Math.max(1, w * 0.06); ctx.stroke();
+      ctx.beginPath();
+      [0.38, 0.62].forEach(k => {
+        const c = lerp(A, B, k);
+        ctx.moveTo(c.x + u.x * w * 0.14, c.y + u.y * w * 0.14);
+        ctx.lineTo(c.x - u.x * w * 0.14, c.y - u.y * w * 0.14);
+      });
+      ctx.stroke();
+      ctx.restore();
+    }
+    function drawJoint(P, w) {
+      ctx.save();
+      ctx.fillStyle = '#08090a';
+      ctx.beginPath(); ctx.arc(P.x, P.y, w * 0.36, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = modeColor() || COLORS.whiteMid; ctx.lineWidth = Math.max(1, w * 0.07);
+      ctx.beginPath(); ctx.arc(P.x, P.y, w * 0.22, 0, Math.PI * 2); ctx.stroke();
+      ctx.restore();
+    }
+    function drawLed(c, r, color, on) {
+      ctx.save();
+      ctx.fillStyle = '#020303';
+      ctx.beginPath(); ctx.arc(c.x, c.y, r * 1.5, 0, Math.PI * 2); ctx.fill();
+      if (on) { ctx.globalCompositeOperation = 'lighter'; ctx.shadowColor = color; ctx.shadowBlur = 10 * DPR; }
+      ctx.fillStyle = on ? color : '#26292c';
+      ctx.beginPath(); ctx.arc(c.x, c.y, r, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+    }
+    function hexPath(c, r, rot = 0) {
+      ctx.beginPath();
+      for (let i = 0; i < 6; i++) {
+        const a = rot + Math.PI / 6 + i * Math.PI / 3;
+        i ? ctx.lineTo(c.x + Math.cos(a) * r, c.y + Math.sin(a) * r) : ctx.moveTo(c.x + Math.cos(a) * r, c.y + Math.sin(a) * r);
+      }
+      ctx.closePath();
+    }
+
+    // Defense mode: hexagon energy shield around the hand
+    function drawShield(P, scale, t) {
+      const c = lerp(P[0], P[9], 0.75);
+      const R = scale * 1.9;
+      const age = (t - suit.modeAt) / 400;
+      const grow = clamp(age, 0, 1);
+      ctx.save();
+      ctx.beginPath(); ctx.arc(c.x, c.y, R * grow, 0, Math.PI * 2); ctx.clip();
+      ctx.globalCompositeOperation = 'lighter';
+      const g = ctx.createRadialGradient(c.x, c.y, R * 0.3, c.x, c.y, R);
+      g.addColorStop(0, 'rgba(79,182,255,0)'); g.addColorStop(1, 'rgba(79,182,255,0.28)');
+      ctx.fillStyle = g; ctx.fillRect(c.x - R, c.y - R, R * 2, R * 2);
+      ctx.strokeStyle = COLORS.defense;
+      ctx.lineWidth = Math.max(1, DPR);
+      const hr = scale * 0.2, rot = t * 0.0002;
+      ctx.globalAlpha = 0.22 + 0.1 * Math.sin(t * 0.004);
+      for (let iy = -6; iy <= 6; iy++) {
+        for (let ix = -6; ix <= 6; ix++) {
+          const x = ix * hr * 1.732 + (iy % 2 ? hr * 0.866 : 0);
+          const y = iy * hr * 1.5;
+          const rx = Math.cos(rot) * x - Math.sin(rot) * y, ry = Math.sin(rot) * x + Math.cos(rot) * y;
+          if (Math.hypot(rx, ry) > R) continue;
+          hexPath({ x: c.x + rx, y: c.y + ry }, hr * 0.95, rot); ctx.stroke();
+        }
+      }
+      ctx.restore();
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.strokeStyle = COLORS.defense; ctx.shadowColor = COLORS.defense; ctx.shadowBlur = 16 * DPR;
+      ctx.lineWidth = 2.5 * DPR; ctx.globalAlpha = 0.85;
+      ctx.beginPath(); ctx.arc(c.x, c.y, R * grow, 0, Math.PI * 2); ctx.stroke();
+      ctx.restore();
+    }
+
+    // Combat mode: red targeting brackets around the hand
+    function drawCombatHud(P, scale, t) {
+      const c = lerp(P[0], P[9], 0.75);
+      const R = scale * 1.55 * (1 + 0.04 * Math.sin(t * 0.01));
+      const age = clamp((t - suit.modeAt) / 300, 0, 1);
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.strokeStyle = COLORS.combat; ctx.shadowColor = COLORS.combat; ctx.shadowBlur = 12 * DPR;
+      ctx.lineWidth = 2.2 * DPR; ctx.globalAlpha = 0.9 * age;
+      const s = R * (1.6 - 0.6 * age), k = s * 0.35;
+      [[-1,-1],[1,-1],[1,1],[-1,1]].forEach(([dx, dy]) => {
+        const x = c.x + dx * s, y = c.y + dy * s;
+        ctx.beginPath(); ctx.moveTo(x - dx * k, y); ctx.lineTo(x, y); ctx.lineTo(x, y - dy * k); ctx.stroke();
+      });
+      ctx.setLineDash([6 * DPR, 6 * DPR]);
+      ctx.lineDashOffset = -t * 0.05;
+      ctx.globalAlpha = 0.5 * age;
+      ctx.beginPath(); ctx.arc(c.x, c.y, s * 0.82, 0, Math.PI * 2); ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawArmor(P, slot, t) {
+      const p = slot.p;
+      const scale = dist(P[0], P[9]);
+      if (scale < 10) return;
+      const online = p >= 1;
+
+      // Fist "tighten" effect: armor squeezes in, then settles
+      const ta = (t - (slot.tightenAt || -9999)) / 380;
+      const wm = ta >= 0 && ta < 1 ? 1 - 0.16 * Math.sin(Math.PI * ta) : 1;
+
+      if (online && suit.mode === 'defense') drawShield(P, scale, t);
+
+      // 1) Scanning grid
+      if (p < 1) {
+        ctx.save();
+        ctx.globalAlpha = 0.55 * (1 - p);
+        ctx.strokeStyle = COLORS.glow; ctx.lineWidth = 1.2 * DPR;
+        ctx.setLineDash([4 * DPR, 4 * DPR]);
+        ctx.beginPath();
+        BONES.forEach(([a, b]) => { ctx.moveTo(P[a].x, P[a].y); ctx.lineTo(P[b].x, P[b].y); });
+        ctx.stroke();
+        ctx.setLineDash([]);
+        P.forEach(q => ctx.strokeRect(q.x - 3 * DPR, q.y - 3 * DPR, 6 * DPR, 6 * DPR));
+        ctx.restore();
+      }
+      if (p > 0 && p < 0.18) spawn(P[0].x, P[0].y, scale * 0.5, 6, 90);
+
+      // 2) Wrist bracer
+      const back = unitDir(P[9], P[0]);
+      const side = { x: -back.y, y: back.x };
+      const cuffEnd = { x: P[0].x + back.x * scale * 0.6, y: P[0].y + back.y * scale * 0.6 };
+      const fc = seg(p, 0.0, 0.16);
+      const cw = scale * 0.7 * wm;
+      if (fc > 0) {
+        const E = lerp(P[0], cuffEnd, fc);
+        ctx.save();
+        rectPath(P[0], E, cw * 1.06); ctx.fillStyle = '#000'; ctx.fill();
+        rectPath(P[0], E, cw); ctx.fillStyle = metalGradient(P[0], side, cw, BLACK_STOPS); ctx.fill();
+        [0.2, 0.5, 0.8].forEach(k => {
+          if (fc < k + 0.08) return;
+          const a = lerp(P[0], cuffEnd, k - 0.06), b = lerp(P[0], cuffEnd, k + 0.06);
+          rectPath(a, b, cw * 0.92);
+          ctx.fillStyle = metalGradient(a, side, cw * 0.92, WHITE_STOPS); ctx.fill();
+          ctx.strokeStyle = '#0a0b0c'; ctx.lineWidth = Math.max(1, scale * 0.012); ctx.stroke();
+        });
+        ctx.restore();
+        if (fc < 1) {
+          ctx.save();
+          ctx.globalCompositeOperation = 'lighter';
+          ctx.shadowColor = COLORS.glow; ctx.shadowBlur = 16 * DPR;
+          ctx.strokeStyle = COLORS.glow; ctx.lineWidth = 2 * DPR;
+          ctx.beginPath();
+          ctx.moveTo(E.x + side.x * cw * 0.55, E.y + side.y * cw * 0.55);
+          ctx.lineTo(E.x - side.x * cw * 0.55, E.y - side.y * cw * 0.55);
+          ctx.stroke();
+          ctx.restore();
+          spawn(E.x, E.y, cw, 4);
+        } else {
+          const ledColor = modeColor() || COLORS.accent;
+          for (let k = 0; k < 4; k++) {
+            const c0 = lerp(P[0], cuffEnd, 0.35);
+            const c = { x: c0.x + side.x * cw * (-0.3 + k * 0.2), y: c0.y + side.y * cw * (-0.3 + k * 0.2) };
+            const on = p > 0.25 + k * 0.2;
+            const blink = k === 3 && online ? (Math.sin(t * 0.008) > 0) : true;
+            drawLed(c, scale * 0.028, k === 3 ? ledColor : COLORS.glow, on && blink);
+          }
+        }
+      }
+
+      // 3) Hand plate (palm side or back side, depending on which faces the camera)
+      const fp = seg(p, 0.08, 0.3);
+      if (fp > 0) {
+        const center = { x: 0, y: 0 };
+        PALM.forEach(i => { center.x += P[i].x / PALM.length; center.y += P[i].y / PALM.length; });
+        const poly = PALM.map(i => lerp(center, P[i], 1.14 * (0.9 + 0.1 * wm)));
+        const R = fp * scale * 1.35;
+
+        ctx.save();
+        ctx.beginPath();
+        poly.forEach((q, i) => i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y));
+        ctx.closePath(); ctx.clip();
+        ctx.beginPath(); ctx.arc(P[0].x, P[0].y, R, 0, Math.PI * 2); ctx.clip();
+        const g = ctx.createRadialGradient(center.x - scale * 0.15, center.y - scale * 0.2, scale * 0.05, center.x, center.y, scale * 0.95);
+        g.addColorStop(0, COLORS.blackHi); g.addColorStop(0.5, COLORS.blackMid); g.addColorStop(1, '#030404');
+        ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+        if (!slot.palmFacing) {
+          // back of hand: white angular panel
+          const panel = [lerp(P[0], P[5], 0.42), lerp(P[0], P[5], 0.82), lerp(P[0], P[17], 0.82), lerp(P[0], P[17], 0.42), lerp(P[0], center, 0.55)];
+          ctx.beginPath();
+          panel.forEach((q, i) => i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y));
+          ctx.closePath();
+          const pg = ctx.createLinearGradient(P[5].x, P[5].y, P[17].x, P[17].y);
+          pg.addColorStop(0, COLORS.whiteMid); pg.addColorStop(0.45, '#ffffff'); pg.addColorStop(1, COLORS.whiteEdge);
+          ctx.fillStyle = pg; ctx.fill();
+          ctx.strokeStyle = '#0a0b0c'; ctx.lineWidth = Math.max(1, scale * 0.02); ctx.stroke();
+          ctx.beginPath();
+          const c1 = lerp(P[0], P[9], 0.62);
+          ctx.moveTo(lerp(P[0], P[5], 0.62).x, lerp(P[0], P[5], 0.62).y); ctx.lineTo(c1.x, c1.y);
+          ctx.lineTo(lerp(P[0], P[17], 0.62).x, lerp(P[0], P[17], 0.62).y);
+          ctx.lineWidth = Math.max(1, scale * 0.016); ctx.stroke();
+        } else {
+          // palm side: radial vents around the palm core
+          const pc = palmCenter(P);
+          ctx.strokeStyle = 'rgba(200,205,210,0.35)';
+          ctx.lineWidth = Math.max(1, scale * 0.02);
+          ctx.beginPath();
+          for (let k = 0; k < 10; k++) {
+            const a = k * Math.PI / 5;
+            ctx.moveTo(pc.x + Math.cos(a) * scale * 0.26, pc.y + Math.sin(a) * scale * 0.26);
+            ctx.lineTo(pc.x + Math.cos(a) * scale * 0.42, pc.y + Math.sin(a) * scale * 0.42);
+          }
+          ctx.stroke();
+        }
+        ctx.restore();
+
+        ctx.save();
+        ctx.strokeStyle = fp < 1 ? COLORS.glow : 'rgba(255,255,255,0.35)';
+        if (fp < 1) { ctx.shadowColor = COLORS.glow; ctx.shadowBlur = 12 * DPR; }
+        ctx.lineWidth = 1.6 * DPR;
+        ctx.beginPath();
+        poly.forEach((q, i) => i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y));
+        ctx.closePath();
+        if (fp < 1) {
+          ctx.clip();
+          ctx.beginPath(); ctx.arc(P[0].x, P[0].y, R, 0, Math.PI * 2); ctx.stroke();
+          const a = Math.random() * Math.PI * 2;
+          spawn(P[0].x + Math.cos(a) * R, P[0].y + Math.sin(a) * R, scale * 0.15, 4);
+        } else ctx.stroke();
+        ctx.restore();
+
+        if (fp >= 1) {
+          if (slot.palmFacing) drawPalmCore(P, scale, slot, t);
+          else {
+            // back of hand: targeting ring
+            const core = lerp(center, P[9], 0.08);
+            const r = scale * 0.12;
+            ctx.save();
+            ctx.fillStyle = '#050606';
+            ctx.beginPath(); ctx.arc(core.x, core.y, r * 1.25, 0, Math.PI * 2); ctx.fill();
+            const spin = online ? t * 0.003 : 0;
+            ctx.strokeStyle = online ? (modeColor() || '#ffffff') : '#5c6064';
+            if (online) { ctx.shadowColor = ctx.strokeStyle; ctx.shadowBlur = 10 * DPR; }
+            ctx.lineWidth = Math.max(1.5, r * 0.22);
+            for (let k = 0; k < 3; k++) {
+              ctx.beginPath();
+              ctx.arc(core.x, core.y, r * 0.85, spin + k * 2.094, spin + k * 2.094 + 1.4);
+              ctx.stroke();
+            }
+            drawLed(core, r * 0.25, online ? (modeColor() || COLORS.accent) : '#26292c', online);
+            ctx.restore();
+          }
+        }
+      }
+
+      // 4) Fingers
+      FINGERS.forEach((fg, idx) => {
+        const w = scale * fg.width * wm;
+        for (let k = 0; k < 3; k++) {
+          drawPlate(P[fg.pts[k]], P[fg.pts[k + 1]], w * (1 - k * 0.08), seg(p, fg.start + k * SEG_STEP, SEG_DUR), t);
+        }
+        if (seg(p, fg.start, SEG_DUR) > 0.3) {
+          if (idx === 0) drawJoint(P[fg.pts[0]], w); else drawGuard(P[fg.pts[0]], P[fg.pts[1]], w);
+        }
+        for (let k = 1; k < 3; k++) {
+          if (seg(p, fg.start + k * SEG_STEP, SEG_DUR) > 0.3) drawJoint(P[fg.pts[k]], w * (1 - k * 0.08));
+        }
+      });
+
+      if (online && suit.mode === 'combat') drawCombatHud(P, scale, t);
+
+      // Tighten flash lines
+      if (ta >= 0 && ta < 1) {
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.globalAlpha = 1 - ta;
+        ctx.strokeStyle = modeColor() || COLORS.glow; ctx.lineWidth = 2 * DPR;
+        ctx.shadowColor = ctx.strokeStyle; ctx.shadowBlur = 14 * DPR;
+        const c = lerp(P[0], P[9], 0.6);
+        ctx.beginPath(); ctx.arc(c.x, c.y, scale * (1.4 - 0.6 * ta), 0, Math.PI * 2); ctx.stroke();
+        ctx.restore();
+      }
+
+      // 5) Online flash
+      if (slot.doneAt) {
+        const age = (t - slot.doneAt) / 700;
+        if (age < 1) {
+          const c = lerp(P[0], P[9], 0.55);
+          ctx.save();
+          ctx.globalAlpha = 1 - age;
+          ctx.strokeStyle = COLORS.glow; ctx.lineWidth = 3 * DPR;
+          ctx.shadowColor = COLORS.glow; ctx.shadowBlur = 20 * DPR;
+          ctx.beginPath(); ctx.arc(c.x, c.y, scale * (0.3 + age * 1.6), 0, Math.PI * 2); ctx.stroke();
+          ctx.restore();
+        }
+      }
+    }
+
+    // Palm core: glows when online and brightens while charging a blast
+    function drawPalmCore(P, scale, slot, t) {
+      const c = palmCenter(P);
+      const online = slot.p >= 1;
+      const ch = slot.charge || 0;
+      const r = scale * 0.2;
+      ctx.save();
+      ctx.fillStyle = '#030404';
+      ctx.beginPath(); ctx.arc(c.x, c.y, r * 1.2, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = '#8a8f94'; ctx.lineWidth = Math.max(1, r * 0.12);
+      ctx.beginPath(); ctx.arc(c.x, c.y, r * 1.05, 0, Math.PI * 2); ctx.stroke();
+      if (online) {
+        const pulse = 0.65 + 0.2 * Math.sin(t * 0.006) + 0.5 * ch;
+        ctx.globalCompositeOperation = 'lighter';
+        const g = ctx.createRadialGradient(c.x, c.y, 0, c.x, c.y, r * (2 + 2.5 * ch));
+        g.addColorStop(0, 'rgba(255,255,255,' + Math.min(1, pulse) + ')');
+        g.addColorStop(0.25, 'rgba(120,200,255,' + Math.min(1, 0.85 * pulse) + ')');
+        g.addColorStop(1, 'rgba(79,182,255,0)');
+        ctx.fillStyle = g;
+        ctx.beginPath(); ctx.arc(c.x, c.y, r * (2 + 2.5 * ch), 0, Math.PI * 2); ctx.fill();
+        if (ch > 0.02) {
+          ctx.strokeStyle = COLORS.blast; ctx.shadowColor = COLORS.blast; ctx.shadowBlur = 14 * DPR;
+          ctx.lineWidth = 2.5 * DPR;
+          ctx.beginPath(); ctx.arc(c.x, c.y, r * 1.5, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * ch); ctx.stroke();
+          pull(c.x, c.y, 3, scale * 0.9, COLORS.blast);
+        }
+      }
+      ctx.restore();
+    }
+
+    // =====================================================================
+    // PALM BLAST
+    // =====================================================================
+    function fireBlast(slot, t) {
+      const P = slot.lm, scale = dist(P[0], P[9]);
+      const c = palmCenter(P);
+      blasts.push({ x: c.x, y: c.y, scale, t0: t });
+      spawn(c.x, c.y, scale * 0.3, 140, 520, COLORS.blast);
+      spawn(c.x, c.y, scale * 0.2, 60, 380, '#ffffff');
+      suit.blastsFired++;
+      suit.power = Math.max(5, suit.power - 4);
+      suit.temp = Math.min(95, suit.temp + 6);
+      sfx.blast();
+      if (navigator.vibrate) navigator.vibrate(60);
+    }
+    function drawBlasts(t) {
+      for (let i = blasts.length - 1; i >= 0; i--) {
+        const b = blasts[i];
+        const age = (t - b.t0) / 650;
+        if (age >= 1) { blasts.splice(i, 1); continue; }
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        // screen light flash
+        ctx.fillStyle = 'rgba(79,182,255,' + (0.28 * (1 - age) * (1 - age)) + ')';
+        ctx.fillRect(0, 0, W, H);
+        // energy core
+        const R = b.scale * (0.6 + age * 3.2);
+        const g = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, R);
+        g.addColorStop(0, 'rgba(255,255,255,' + (1 - age) + ')');
+        g.addColorStop(0.25, 'rgba(140,210,255,' + 0.9 * (1 - age) + ')');
+        g.addColorStop(0.6, 'rgba(79,182,255,' + 0.45 * (1 - age) + ')');
+        g.addColorStop(1, 'rgba(79,182,255,0)');
+        ctx.fillStyle = g;
+        ctx.beginPath(); ctx.arc(b.x, b.y, R, 0, Math.PI * 2); ctx.fill();
+        // shockwave rings
+        ctx.strokeStyle = COLORS.blast; ctx.shadowColor = COLORS.blast; ctx.shadowBlur = 18 * DPR;
+        [1, 0.6].forEach((k, j) => {
+          ctx.globalAlpha = (1 - age) * (j ? 0.6 : 1);
+          ctx.lineWidth = (5 - 3 * age) * DPR;
+          ctx.beginPath(); ctx.arc(b.x, b.y, b.scale * (0.4 + age * 4.5 * k), 0, Math.PI * 2); ctx.stroke();
+        });
+        // light streaks
+        ctx.globalAlpha = 0.8 * (1 - age);
+        ctx.lineWidth = 2 * DPR;
+        ctx.strokeStyle = '#ffffff';
+        for (let k = 0; k < 14; k++) {
+          const a = k * Math.PI * 2 / 14 + b.t0;
+          const r0 = b.scale * (0.3 + age * 2.2), r1 = r0 + b.scale * (0.6 + 0.8 * (1 - age));
+          ctx.beginPath();
+          ctx.moveTo(b.x + Math.cos(a) * r0, b.y + Math.sin(a) * r0);
+          ctx.lineTo(b.x + Math.cos(a) * r1, b.y + Math.sin(a) * r1);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+    }
+
+    // =====================================================================
+    // HOLOGRAPHIC MENU + STATUS HUD
+    // =====================================================================
+    const MENU_ITEMS = [
+      { id: 'status', label: 'STATUS' },
+      { id: 'mode',   label: 'SWITCH MODE' },
+      { id: 'scan',   label: 'SCAN' },
+      { id: 'close',  label: 'CLOSE' }
+    ];
+    function openMenu(P, t) {
+      const scale = dist(P[0], P[9]);
+      const bh = 44 * DPR, gap = 10 * DPR, head = 36 * DPR, pad = 12 * DPR, inner = 14 * DPR;
+      const hx = P[0].x;
+      const colW = Math.min(230 * DPR, W * 0.48);
+      const roomRight = W - (hx + scale * 1.1), roomLeft = hx - scale * 1.1;
+
+      if (Math.max(roomRight, roomLeft) >= colW + pad) {
+        // Column panel beside the hand
+        menu.w = colW;
+        menu.h = head + MENU_ITEMS.length * (bh + gap);
+        menu.x = roomRight >= roomLeft ? hx + scale * 1.1 : hx - scale * 1.1 - menu.w;
+        menu.y = clamp(P[9].y - menu.h / 2, 70 * DPR, H - menu.h - 120 * DPR);
+        menu.x = clamp(menu.x, pad, W - menu.w - pad);
+        menu.buttons = MENU_ITEMS.map((it, i) => ({ ...it, x: menu.x + inner, y: menu.y + head + i * (bh + gap), w: menu.w - inner * 2, h: bh }));
+      } else {
+        // Not enough room beside the hand (e.g. phone held upright): compact 2x2 grid above the hand
+        menu.w = Math.min(360 * DPR, W - pad * 2);
+        menu.h = head + 2 * (bh + gap);
+        menu.x = (W - menu.w) / 2;
+        const tipTop = Math.min(...P.map(q => q.y));
+        menu.y = clamp(tipTop - menu.h - 24 * DPR, 60 * DPR, H - menu.h - 120 * DPR);
+        const bw = (menu.w - inner * 2 - gap) / 2;
+        menu.buttons = MENU_ITEMS.map((it, i) => ({ ...it, x: menu.x + inner + (i % 2) * (bw + gap), y: menu.y + head + Math.floor(i / 2) * (bh + gap), w: bw, h: bh }));
+      }
+      menu.open = true; menu.openedAt = t; menu.lastActive = t; menu.hover = -1;
+      sfx.menu();
+    }
+    function selectItem(id, t) {
+      sfx.select();
+      menu.lastActive = t;
+      if (id === 'status') { suit.statusOn = !suit.statusOn; toast(suit.statusOn ? 'STATUS DISPLAY ON' : 'STATUS DISPLAY OFF', t); }
+      if (id === 'mode') setMode(suit.mode === 'combat' ? 'defense' : 'combat', t);
+      if (id === 'scan') { suit.scanAt = t; sfx.scan(); }
+      if (id === 'close') menu.open = false;
+    }
+    function toast(text, t) { suit.toast = text; suit.toastAt = t; }
+    function setMode(m, t) {
+      suit.mode = m; suit.modeAt = t;
+      sfx.mode(m);
+      toast(m === 'combat' ? 'COMBAT MODE' : 'DEFENSE MODE', t);
+      Object.values(slots).forEach(s => s.tightenAt = t);
+    }
+
+    function updateMenu(hands, t, dt) {
+      if (!menu.open) return;
+      // any fingertip (index) can hover a button
+      let hit = -1, tip = null;
+      hands.forEach(s => {
+        const q = s.lm[8];
+        menu.buttons.forEach((b, i) => {
+          if (q.x >= b.x && q.x <= b.x + b.w && q.y >= b.y && q.y <= b.y + b.h) { hit = i; tip = q; }
+        });
+        // pinch (thumb + index together) = instant click
+        const pinch = dist(s.lm[4], s.lm[8]) < dist(s.lm[0], s.lm[9]) * 0.25;
+        if (pinch && !s.wasPinch && hit >= 0) { selectItem(menu.buttons[hit].id, t); hit = -2; }
+        s.wasPinch = pinch;
+      });
+      if (hit === -2) return;
+      if (hit !== menu.hover) { menu.hover = hit; menu.hoverSince = t; if (hit >= 0) sfx.hover(); }
+      if (hit >= 0) {
+        menu.lastActive = t;
+        menu.tip = tip;
+        if ((t - menu.hoverSince) / 1000 >= MENU_DWELL) { selectItem(menu.buttons[hit].id, t); menu.hoverSince = t + 99999; }
+      }
+      if (t - menu.lastActive > 8000) menu.open = false;
+    }
+
+    function drawMenu(t) {
+      if (!menu.open) return;
+      const age = clamp((t - menu.openedAt) / 250, 0, 1);
+      ctx.save();
+      // unfold animation
+      ctx.translate(menu.x, menu.y + menu.h / 2);
+      ctx.scale(1, age);
+      ctx.translate(-menu.x, -(menu.y + menu.h / 2));
+      ctx.globalAlpha = 0.85 + 0.15 * Math.sin(t * 0.05) * (1 - age);
+      // panel
+      ctx.fillStyle = 'rgba(70,160,230,0.14)';
+      ctx.strokeStyle = COLORS.holo; ctx.shadowColor = COLORS.holo; ctx.shadowBlur = 12 * DPR;
+      ctx.lineWidth = 1.5 * DPR;
+      ctx.fillRect(menu.x, menu.y, menu.w, menu.h);
+      ctx.strokeRect(menu.x, menu.y, menu.w, menu.h);
+      ctx.shadowBlur = 0;
+      // scanlines
+      ctx.fillStyle = 'rgba(143,214,255,0.06)';
+      for (let y = menu.y; y < menu.y + menu.h; y += 4 * DPR) ctx.fillRect(menu.x, y, menu.w, DPR);
+      // title
+      ctx.fillStyle = COLORS.holo;
+      ctx.font = `600 ${13 * DPR}px system-ui, sans-serif`;
+      ctx.textBaseline = 'middle';
+      ctx.fillText('◇ SUIT CONTROL', menu.x + 14 * DPR, menu.y + 19 * DPR);
+      // buttons
+      menu.buttons.forEach((b, i) => {
+        const hov = i === menu.hover;
+        ctx.fillStyle = hov ? 'rgba(143,214,255,0.32)' : 'rgba(143,214,255,0.1)';
+        ctx.fillRect(b.x, b.y, b.w, b.h);
+        ctx.strokeStyle = COLORS.holo; ctx.lineWidth = (hov ? 2 : 1) * DPR;
+        ctx.strokeRect(b.x, b.y, b.w, b.h);
+        ctx.fillStyle = '#e6f6ff';
+        ctx.font = `${hov ? 700 : 500} ${15 * DPR}px system-ui, sans-serif`;
+        let label = b.label;
+        if (b.id === 'status') label += suit.statusOn ? '  ● ON' : '  ○ OFF';
+        if (b.id === 'mode') label = 'MODE: ' + (suit.mode === 'standard' ? '—' : suit.mode.toUpperCase());
+        ctx.fillText(label, b.x + 12 * DPR, b.y + b.h / 2);
+        // dwell progress bar
+        if (hov) {
+          const k = clamp((t - menu.hoverSince) / 1000 / MENU_DWELL, 0, 1);
+          ctx.fillStyle = COLORS.holo;
+          ctx.fillRect(b.x, b.y + b.h - 3 * DPR, b.w * k, 3 * DPR);
+        }
+      });
+      ctx.restore();
+
+      // fingertip cursor
+      if (menu.hover >= 0 && menu.tip) {
+        const k = clamp((t - menu.hoverSince) / 1000 / MENU_DWELL, 0, 1);
+        ctx.save();
+        ctx.strokeStyle = COLORS.holo; ctx.lineWidth = 3 * DPR;
+        ctx.shadowColor = COLORS.holo; ctx.shadowBlur = 10 * DPR;
+        ctx.beginPath(); ctx.arc(menu.tip.x, menu.tip.y, 16 * DPR, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * k); ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    function drawStatus(t, online) {
+      if (!suit.statusOn) return;
+      const x = 14 * DPR, w = Math.min(210 * DPR, W * 0.5), lh = 22 * DPR;
+      const lines = [
+        ['MODE', suit.mode === 'standard' ? 'STANDARD' : suit.mode.toUpperCase()],
+        ['ARMOR', online ? 'ONLINE' : 'OFFLINE'],
+        ['INTEGRITY', '100%'],
+        ['CORE TEMP', Math.round(suit.temp) + '°C'],
+        ['BLASTS', String(suit.blastsFired)]
+      ];
+      const h = 44 * DPR + lines.length * lh;
+      const y = H - h - 96 * DPR; // bottom-left, above the buttons
+      ctx.save();
+      ctx.fillStyle = 'rgba(10,20,28,0.55)';
+      ctx.strokeStyle = COLORS.holo; ctx.lineWidth = 1.2 * DPR;
+      ctx.fillRect(x, y, w, h); ctx.strokeRect(x, y, w, h);
+      ctx.font = `600 ${12 * DPR}px system-ui, sans-serif`;
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = COLORS.holo;
+      ctx.fillText('POWER', x + 10 * DPR, y + 16 * DPR);
+      ctx.fillStyle = 'rgba(143,214,255,0.2)';
+      ctx.fillRect(x + 64 * DPR, y + 11 * DPR, w - 76 * DPR, 10 * DPR);
+      ctx.fillStyle = suit.power > 30 ? COLORS.holo : COLORS.combat;
+      ctx.fillRect(x + 64 * DPR, y + 11 * DPR, (w - 76 * DPR) * suit.power / 100, 10 * DPR);
+      lines.forEach(([k, v], i) => {
+        const yy = y + 40 * DPR + i * lh;
+        ctx.fillStyle = 'rgba(143,214,255,0.75)'; ctx.fillText(k, x + 10 * DPR, yy);
+        ctx.fillStyle = '#e6f6ff'; ctx.textAlign = 'right'; ctx.fillText(v, x + w - 10 * DPR, yy); ctx.textAlign = 'left';
+      });
+      ctx.restore();
+    }
+
+    function drawScan(t) {
+      const age = (t - suit.scanAt) / 1400;
+      if (!suit.scanAt || age >= 1.6) return;
+      ctx.save();
+      if (age < 1) {
+        const y = H * age;
+        ctx.globalCompositeOperation = 'lighter';
+        const g = ctx.createLinearGradient(0, y - 80 * DPR, 0, y);
+        g.addColorStop(0, 'rgba(143,214,255,0)'); g.addColorStop(1, 'rgba(143,214,255,0.35)');
+        ctx.fillStyle = g; ctx.fillRect(0, y - 80 * DPR, W, 80 * DPR);
+        ctx.strokeStyle = COLORS.holo; ctx.lineWidth = 2 * DPR;
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+        ctx.globalAlpha = 0.18; ctx.lineWidth = DPR;
+        for (let x = 0; x < W; x += 40 * DPR) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, y); ctx.stroke(); }
+        for (let yy = 0; yy < y; yy += 40 * DPR) { ctx.beginPath(); ctx.moveTo(0, yy); ctx.lineTo(W, yy); ctx.stroke(); }
+      } else if (age < 1.6) {
+        toast('SCAN COMPLETE · NO THREATS', t);
+      }
+      ctx.restore();
+    }
+
+    function drawToast(t) {
+      const age = (t - suit.toastAt) / 1600;
+      if (!suit.toast || age >= 1) return;
+      ctx.save();
+      ctx.globalAlpha = age < 0.8 ? 1 : (1 - age) / 0.2;
+      ctx.font = `700 ${20 * DPR}px system-ui, sans-serif`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      const col = suit.toast.includes('COMBAT') ? COLORS.combat : suit.toast.includes('DEFENSE') ? COLORS.defense : COLORS.holo;
+      ctx.fillStyle = col; ctx.shadowColor = col; ctx.shadowBlur = 14 * DPR;
+      ctx.fillText(suit.toast, W / 2, 80 * DPR);
+      ctx.restore();
+    }
+
+    // =====================================================================
+    // CAMERA VIDEO + LANDMARK MAPPING
+    // =====================================================================
+    let view = { s: 1, ox: 0, oy: 0, dw: 0, dh: 0 };
+    function drawVideo() {
+      const vw = video.videoWidth, vh = video.videoHeight;
+      if (!vw) return false;
+      const s = Math.max(W / vw, H / vh);
+      view = { s, dw: vw * s, dh: vh * s, ox: (W - vw * s) / 2, oy: (H - vh * s) / 2 };
+      ctx.save();
+      if (facing === 'user') { ctx.translate(W, 0); ctx.scale(-1, 1); }
+      ctx.drawImage(video, view.ox, view.oy, view.dw, view.dh);
+      ctx.restore();
+      return true;
+    }
+    function toScreen(lm) {
+      let x = view.ox + lm.x * view.dw;
+      const y = view.oy + lm.y * view.dh;
+      if (facing === 'user') x = W - x;
+      return { x, y };
+    }
+
+    // =====================================================================
+    // DEMO MODE (open with ?demo) — a simulated hand acts out every gesture
+    // =====================================================================
+    const POSE_OPEN = [[.50,.86],[.40,.79],[.33,.71],[.28,.63],[.24,.56],[.42,.58],[.40,.45],[.39,.37],[.385,.30],
+                       [.50,.56],[.50,.42],[.50,.33],[.50,.26],[.57,.58],[.59,.46],[.60,.38],[.61,.32],
+                       [.63,.62],[.66,.53],[.68,.47],[.69,.42]];
+    const POSE_FIST = [[.50,.86],[.40,.79],[.36,.72],[.40,.66],[.45,.64],[.42,.58],[.41,.50],[.43,.55],[.44,.60],
+                       [.50,.56],[.50,.48],[.50,.53],[.50,.59],[.57,.58],[.58,.50],[.57,.55],[.565,.60],
+                       [.63,.62],[.645,.555],[.635,.59],[.625,.625]];
+    const POSE_POINT = POSE_OPEN.slice(0, 9).concat(POSE_FIST.slice(9));
+    const demoState = { offX: 0, offY: 0, clock: 0, cycle: 0 };
+    function demoPose(t) {
+      const ph = demoState.clock % 17;
+      let pose = POSE_OPEN, palm = false;
+      if (ph < 5) pose = POSE_OPEN;
+      else if (ph < 7.6) { pose = POSE_OPEN; palm = true; }
+      else if (ph < 8.8) pose = POSE_FIST;
+      else if (ph < 9.8) pose = POSE_OPEN;
+      else if (ph < 11) pose = POSE_FIST;
+      else if (ph < 16) pose = POSE_POINT;
+      const size = Math.min(W, H) * 0.85;
+      const ox = (W - size) / 2, oy = (H - size) / 2 + size * 0.06;
+      let pts = pose.map(([x, y], i) => ({ x: ox + x * size + Math.sin(t * 0.0012 + i) * 1.5, y: oy + y * size }));
+      // when the menu is open, steer the pointing fingertip onto the first button
+      let tx = 0, ty = 0;
+      if (menu.open && pose === POSE_POINT && ph > 12.6) {
+        const b = menu.buttons[0];
+        tx = b.x + b.w * 0.5 - pts[8].x; ty = b.y + b.h * 0.5 - pts[8].y;
+      }
+      demoState.offX += (tx - demoState.offX) * 0.06;
+      demoState.offY += (ty - demoState.offY) * 0.06;
+      pts = pts.map(q => ({ x: q.x + demoState.offX, y: q.y + demoState.offY }));
+      return { pts, palm };
+    }
+
+    // =====================================================================
+    // MAIN LOOP
+    // =====================================================================
+    let lastSeen = {};
+    let prev = performance.now();
+    function loop(now) {
+      const dt = Math.min((now - prev) / 1000, 0.05);
+      prev = now;
+      ctx.clearRect(0, 0, W, H);
+
+      const seen = {};
+      if (demo) {
+        const g = ctx.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, Math.max(W, H) * 0.7);
+        g.addColorStop(0, '#3a3e43'); g.addColorStop(1, '#101214');
+        ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+        demoState.clock += dt;
+        const d = demoPose(now);
+        seen.Demo = { pts: d.pts, palm: d.palm };
+      } else if (drawVideo() && landmarker && video.currentTime !== lastVideoTime) {
+        lastVideoTime = video.currentTime;
+        const res = landmarker.detectForVideo(video, now);
+        (res.landmarks || []).forEach((hand, i) => {
+          const label = (res.handedness && res.handedness[i] && res.handedness[i][0]) ? res.handedness[i][0].categoryName : 'Hand' + i;
+          seen[label] = { pts: hand.map(toScreen), palm: isPalmFacing(hand, label) };
+        });
+        lastSeen = seen;
+      } else if (!demo) {
+        Object.assign(seen, lastSeen);
+      }
+
+      const active = [];
+      let best = 0, any = false, anyOnline = false, gestureNow = '';
+      Object.keys(seen).forEach(key => {
+        const { pts, palm } = seen[key];
+        const slot = slots[key] || (slots[key] = { lm: pts.map(q => ({ ...q })), p: 0, started: false, doneAt: 0, charge: 0, lastBlast: 0, gesture: '', gestureSince: now, fistUsed: false, pointUsed: false });
+        slot.lm = slot.lm.map((q, i) => lerp(q, pts[i], 0.55));
+        slot.last = now;
+        slot.palmFacing = palm;
+
+        // --- gesture with a short hold to avoid flicker
+        const g = classify(slot.lm);
+        if (g !== slot.gesture) { slot.gesture = g; slot.gestureSince = now; }
+        const held = (now - slot.gestureSince) / 1000;
+        if (g !== 'fist') slot.fistUsed = false;
+        if (g !== 'point') slot.pointUsed = false;
+
+        // 1) OPEN HAND → start the suit
+        if (!slot.started && g === 'open' && held > 0.25) { slot.started = true; sfx.deploy(); }
+        if (slot.started) slot.p = Math.min(1, slot.p + dt / DEPLOY_SECONDS);
+        if (slot.p >= 1 && !slot.doneAt) {
+          slot.doneAt = now;
+          spawn(slot.lm[9].x, slot.lm[9].y, 40 * DPR, 80, 260);
+          sfx.online();
+        }
+        const online = slot.p >= 1;
+
+        // 2) FIST → tighten armor + switch mode
+        if (online && g === 'fist' && held > 0.25 && !slot.fistUsed) {
+          slot.fistUsed = true;
+          setMode(suit.mode === 'combat' ? 'defense' : 'combat', now);
+        }
+
+        // 3) PALM TO CAMERA (open hand) → charge and fire palm blast
+        if (online && g === 'open' && palm && !menu.open) {
+          if (slot.charge === 0) sfx.charge();
+          slot.charge = Math.min(1, slot.charge + dt / CHARGE_SECONDS);
+          if (slot.charge >= 1 && (now - slot.lastBlast) / 1000 > BLAST_COOLDOWN) {
+            fireBlast(slot, now);
+            slot.lastBlast = now;
+            slot.charge = 0;
+          }
+        } else {
+          slot.charge = Math.max(0, slot.charge - dt * 2);
+        }
+
+        // 4) POINT ONE FINGER → open the holographic menu
+        if (online && g === 'point' && held > 0.5 && !slot.pointUsed && !menu.open) {
+          slot.pointUsed = true;
+          openMenu(slot.lm, now);
+        }
+
+        drawArmor(slot.lm, slot, now);
+        active.push(slot);
+        best = Math.max(best, slot.p); any = true;
+        if (online) { anyOnline = true; gestureNow = g; }
+        if (!slot.started) gestureNow = 'waiting';
+      });
+
+      // hands that left the view: armor retracts
+      Object.keys(slots).forEach(key => {
+        if (seen[key]) return;
+        const slot = slots[key];
+        if (now - slot.last > 250) {
+          slot.p = Math.max(0, slot.p - dt / RETRACT_SECONDS);
+          slot.charge = 0;
+          if (slot.p < 1) slot.doneAt = 0;
+          if (slot.p <= 0) slot.started = false;
+        }
+      });
+
+      updateMenu(active.filter(s => s.p >= 1), now, dt);
+      drawBlasts(now);
+      drawParticles(dt);
+      drawMenu(now);
+      drawStatus(now, anyOnline);
+      drawScan(now);
+      drawToast(now);
+
+      // power recharges and core cools down over time
+      suit.power = Math.min(100, suit.power + dt * 3);
+      suit.temp = Math.max(31, suit.temp - dt * 4);
+
+      // demo loop: restart the show
+      if (demo && slots.Demo && Math.floor(demoState.clock / 17) !== demoState.cycle) {
+        demoState.cycle = Math.floor(demoState.clock / 17);
+        slots.Demo.p = 0; slots.Demo.started = false; slots.Demo.doneAt = 0;
+        suit.mode = 'standard'; menu.open = false; suit.statusOn = false;
+      }
+
+      if (!landmarker && !demo) statusEl.textContent = 'Loading hand tracking…';
+      else if (!any) statusEl.textContent = '✋ Show your open hand to the camera';
+      else if (gestureNow === 'waiting') statusEl.textContent = '✋ Open your hand to activate the suit';
+      else if (best < 1) statusEl.textContent = 'Deploying armor… ' + Math.round(best * 100) + '%';
+      else {
+        const modeTxt = suit.mode === 'standard' ? 'ONLINE' : suit.mode.toUpperCase() + ' MODE';
+        const charging = active.some(s => s.charge > 0.05);
+        statusEl.textContent = charging ? '⚡ Palm charging…' : menu.open ? '☝️ Hover a button to select' : '◉ SUIT ' + modeTxt;
+      }
+      requestAnimationFrame(loop);
+    }
+
+    // =====================================================================
+    // START + BUTTONS
+    // =====================================================================
+    async function loadModel() {
+      const files = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.1.0/wasm');
+      const opts = (delegate) => ({
+        baseOptions: {
+          modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+          delegate
+        },
+        runningMode: 'VIDEO',
+        numHands: 2,
+        minHandDetectionConfidence: 0.5,
+        minHandPresenceConfidence: 0.5,
+        minTrackingConfidence: 0.5
+      });
+      try { landmarker = await HandLandmarker.createFromOptions(files, opts('GPU')); }
+      catch (e) { landmarker = await HandLandmarker.createFromOptions(files, opts('CPU')); }
+    }
+    async function startCamera() {
+      if (video.srcObject) video.srcObject.getTracks().forEach(tr => tr.stop());
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false
+      });
+      video.srcObject = stream;
+      await video.play();
+      lastVideoTime = -1;
+    }
+    const modelPromise = demo ? Promise.resolve() : loadModel().catch(err => {
+      statusEl.textContent = 'Could not load hand tracking. Check your internet and reload.';
+      console.error(err);
+    });
+
+    document.getElementById('startBtn').addEventListener('click', async () => {
+      audioInit();
+      const msg = document.getElementById('loadMsg');
+      try {
+        if (!demo) {
+          msg.textContent = 'Starting camera…';
+          await startCamera();
+          msg.textContent = 'Loading hand tracking…';
+          await modelPromise;
+        }
+        document.getElementById('start').style.display = 'none';
+      } catch (err) {
+        msg.textContent = 'Camera error: ' + err.message + '. Allow camera access and reload.';
+      }
+    });
+    document.getElementById('flipBtn').addEventListener('click', async () => {
+      if (demo) return;
+      facing = facing === 'user' ? 'environment' : 'user';
+      Object.keys(slots).forEach(k => delete slots[k]);
+      lastSeen = {};
+      try { await startCamera(); } catch (e) { statusEl.textContent = 'Could not switch camera'; }
+    });
+    document.getElementById('soundBtn').addEventListener('click', function () {
+      audioInit();
+      soundOn = !soundOn;
+      this.textContent = soundOn ? '🔊 Sound' : '🔇 Muted';
+    });
+    document.getElementById('palmBtn').addEventListener('click', () => {
+      palmFlip = !palmFlip;
+      toast(palmFlip ? 'PALM DETECTION FLIPPED' : 'PALM DETECTION NORMAL', performance.now());
+    });
+    // You can also tap the holo menu buttons on the screen
+    canvas.addEventListener('pointerdown', (e) => {
+      if (!menu.open) return;
+      const x = e.clientX * DPR, y = e.clientY * DPR;
+      menu.buttons.forEach(b => { if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) selectItem(b.id, performance.now()); });
+    });
+
+    if (demo) window.__demo = demoState; // lets you inspect the demo in the browser console
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
