@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Camera Test</title>
+  <style>
+    body { font-family: sans-serif; padding: 16px; font-size: 18px; }
+    video { width: 100%; background: #000; margin-top: 12px; }
+    button { font-size: 20px; padding: 12px 20px; }
+  </style>
+</head>
+<body>
+  <h2>Camera Test</h2>
+  <div id="log"></div>
+  <button id="btn">Start camera</button>
+  <video id="vid" autoplay playsinline muted></video>
+
+  <script src="https://aframe.io/releases/1.3.0/aframe.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/AR-js-org/AR.js/aframe/build/aframe-ar.js"></script>
+  <script>
+    const log = (msg) => document.getElementById('log').innerHTML += msg + '<br>';
+    log('HTTPS: ' + (location.protocol === 'https:' ? '✅ yes' : '❌ no'));
+    log('A-Frame loaded: ' + (window.AFRAME ? '✅ yes' : '❌ no'));
+    log('AR.js loaded: ' + (window.THREEx || window.ARjs ? '✅ yes' : '❌ no'));
+    log('Camera supported: ' + (navigator.mediaDevices && navigator.mediaDevices.getUserMedia ? '✅ yes' : '❌ no'));
+
+    document.getElementById('btn').onclick = async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+        document.getElementById('vid').srcObject = stream;
+        log('Camera: ✅ working');
+      } catch (e) {
+        log('Camera: ❌ ' + e.name + ' — ' + e.message);
+      }
+    };
+  </script>
+</body>
+</html>
