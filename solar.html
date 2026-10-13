@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Solar System AR</title>
+    <script src="https://aframe.io/releases/1.3.0/aframe.min.js"></script>
+    <script src="https://raw.githack.com/AR-js-org/AR.js/master/aframe/build/aframe-ar.js"></script>
+
+    <script>
+      // ===== EDIT THE PLANETS HERE =====
+      // orbit = distance from the Sun, size = planet radius,
+      // period = time for one full orbit in seconds (smaller = faster).
+      // (Sizes and distances are not to real scale, so everything fits on screen.)
+      var PLANETS = [
+        { name: 'Mercury', orbit: 0.55, size: 0.04,  color: '#a8a8a8', period: 4  },
+        { name: 'Venus',   orbit: 0.75, size: 0.07,  color: '#e8c27a', period: 7  },
+        { name: 'Earth',   orbit: 1.00, size: 0.075, color: '#2f7fd6', period: 10, moon: true },
+        { name: 'Mars',    orbit: 1.25, size: 0.055, color: '#c1440e', period: 15 },
+        { name: 'Jupiter', orbit: 1.65, size: 0.18,  color: '#d8b48a', period: 26 },
+        { name: 'Saturn',  orbit: 2.05, size: 0.15,  color: '#e3cf98', period: 34, rings: true },
+        { name: 'Uranus',  orbit: 2.40, size: 0.11,  color: '#9fe3e8', period: 44 },
+        { name: 'Neptune', orbit: 2.70, size: 0.105, color: '#3f63d6', period: 54 }
+      ];
+
+      // Spins an entity around its own vertical axis (used to move planets in orbits).
+      AFRAME.registerComponent('spin', {
+        schema: { period: { default: 10 }, start: { default: 0 } },
+        init: function () { this.angle = this.data.start; },
+        tick: function (t, dt) {
+          if (window.PAUSED) return;
+          this.angle += (Math.min(dt || 16, 50) / 1000) * (360 / this.data.period);
+          this.el.object3D.rotation.y = THREE.MathUtils.degToRad(this.angle);
+        }
+      });
+
+      // Keeps a label turned toward the camera so you can always read it.
+      AFRAME.registerComponent('face-camera', {
+        init: function () { this.camPos = new THREE.Vector3(); },
+        tick: function () {
+          var cam = this.el.sceneEl.camera;
+          if (!cam) return;
+          cam.getWorldPosition(this.camPos);
+          this.el.object3D.lookAt(this.camPos);
+        }
+      });
+
+      // Builds the Sun and planets inside the #system entity.
+      AFRAME.registerComponent('solar-system', {
+        init: function () {
+          var root = this.el;
+
+          PLANETS.forEach(function (p, i) {
+            // Faint orbit path
+            var ring = document.createElement('a-ring');
+            ring.setAttribute('radius-inner', p.orbit - 0.006);
+            ring.setAttribute('radius-outer', p.orbit + 0.006);
+            ring.setAttribute('rotation', '-90 0 0');
+            ring.setAttribute('material', 'color: #ffffff; opacity: 0.25; transparent: true; shader: flat; side: double');
+            root.appendChild(ring);
+
+            // Orbit pivot (this is what rotates around the Sun)
+            var pivot = document.createElement('a-entity');
+            pivot.setAttribute('spin', { period: p.period, start: i * 47 });
+            root.appendChild(pivot);
+
+            // The planet itself
+            var planet = document.createElement('a-entity');
+            planet.setAttribute('position', p.orbit + ' 0 0');
+            pivot.appendChild(planet);
+
+            var ball = document.createElement('a-sphere');
+            ball.setAttribute('radius', p.size);
+            ball.setAttribute('segments-width', 24);
+            ball.setAttribute('segments-height', 16);
+            ball.setAttribute('material', 'color: ' + p.color + '; roughness: 0.8');
+            planet.appendChild(ball);
+
+            if (p.rings) {
+              var sRing = document.createElement('a-ring');
+              sRing.setAttribute('radius-inner', p.size * 1.35);
+              sRing.setAttribute('radius-outer', p.size * 2.2);
+              sRing.setAttribute('rotation', '-70 0 0');
+              sRing.setAttribute('material', 'color: #cdb98a; opacity: 0.8; transparent: true; side: double');
+              planet.appendChild(sRing);
+            }
+
+            if (p.moon) {
+              var moonPivot = document.createElement('a-entity');
+              moonPivot.setAttribute('spin', { period: 2.5 });
+              var moon = document.createElement('a-sphere');
+              moon.setAttribute('radius', 0.022);
+              moon.setAttribute('position', '0.14 0 0');
+              moon.setAttribute('color', '#cfcfcf');
+              moonPivot.appendChild(moon);
+              planet.appendChild(moonPivot);
+            }
+
+            var label = document.createElement('a-text');
+            label.setAttribute('value', p.name);
+            label.setAttribute('align', 'center');
+            label.setAttribute('color', '#ffffff');
+            label.setAttribute('width', 1.6);
+            label.setAttribute('position', '0 ' + (p.size + 0.09) + ' 0');
+            label.setAttribute('face-camera', '');
+            label.classList.add('label');
+            planet.appendChild(label);
+          });
+        }
+      });
+    </script>
+
+    <style>
+      .hint {
+        position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%);
+        z-index: 10; background: rgba(0,0,0,0.6); color: #fff;
+        font: 15px sans-serif; padding: 8px 14px; border-radius: 20px;
+        pointer-events: none; white-space: nowrap;
+      }
+      .bar {
+        position: fixed; top: 14px; left: 0; right: 0; z-index: 10;
+        display: flex; justify-content: center; gap: 8px; flex-wrap: wrap; padding: 0 12px;
+      }
+      .bar button {
+        background: #2b59c3; color: #fff; border: none;
+        font: bold 14px sans-serif; padding: 9px 14px; border-radius: 18px;
+      }
+    </style>
+  </head>
+
+  <body style="margin:0; overflow:hidden;">
+    <div class="hint">🪐 Point your camera at the Hiro marker</div>
+    <div class="bar">
+      <button id="modeBtn">Marker on table?</button>
+      <button id="labelBtn">Hide names</button>
+      <button id="pauseBtn">Pause</button>
+    </div>
+
+    <a-scene embedded
+             arjs="sourceType: webcam; debugUIEnabled: false;"
+             vr-mode-ui="enabled: false"
+             renderer="logarithmicDepthBuffer: true; antialias: true;">
+
+      <a-entity light="type: ambient; color: #ffffff; intensity: 0.35"></a-entity>
+
+      <a-marker preset="hiro">
+        <!-- Stand: tilts the solar system so you can see the orbits.
+             Screen mode (default): marker shown on a phone/laptop.
+             Table mode: marker lying flat on a table. -->
+        <a-entity id="stand" rotation="-35 0 0" position="0 0.4 0">
+          <a-entity id="system" scale="0.4 0.4 0.4" solar-system>
+
+            <!-- The Sun: glowing core, soft halo and a light that shines on the planets -->
+            <a-sphere radius="0.3" segments-width="32" segments-height="20"
+                      material="shader: flat; color: #ffd23f"
+                      animation="property: rotation; to: 0 360 0; loop: true; dur: 20000; easing: linear"></a-sphere>
+            <a-sphere radius="0.38" material="shader: flat; color: #ff9900; opacity: 0.25; transparent: true"
+                      animation="property: scale; from: 1 1 1; to: 1.08 1.08 1.08; dir: alternate; loop: true; dur: 1500; easing: easeInOutSine"></a-sphere>
+            <a-entity light="type: point; color: #fff3d6; intensity: 1.6; distance: 10; decay: 1"></a-entity>
+            <a-text value="Sun" align="center" color="#ffffff" width="1.8" position="0 0.47 0" face-camera class="label"></a-text>
+
+          </a-entity>
+        </a-entity>
+      </a-marker>
+
+      <a-entity camera></a-entity>
+    </a-scene>
+
+    <script>
+      window.PAUSED = false;
+
+      var tableMode = false;
+      document.getElementById('modeBtn').addEventListener('click', function () {
+        var stand = document.getElementById('stand');
+        tableMode = !tableMode;
+        if (tableMode) {
+          stand.setAttribute('rotation', '0 0 0');
+          stand.setAttribute('position', '0 0.15 0');
+          this.textContent = 'Marker on screen?';
+        } else {
+          stand.setAttribute('rotation', '-35 0 0');
+          stand.setAttribute('position', '0 0.4 0');
+          this.textContent = 'Marker on table?';
+        }
+      });
+
+      var labelsOn = true;
+      document.getElementById('labelBtn').addEventListener('click', function () {
+        labelsOn = !labelsOn;
+        document.querySelectorAll('.label').forEach(function (el) {
+          el.setAttribute('visible', labelsOn);
+        });
+        this.textContent = labelsOn ? 'Hide names' : 'Show names';
+      });
+
+      document.getElementById('pauseBtn').addEventListener('click', function () {
+        window.PAUSED = !window.PAUSED;
+        this.textContent = window.PAUSED ? 'Play' : 'Pause';
+      });
+    </script>
+  </body>
+</html>
