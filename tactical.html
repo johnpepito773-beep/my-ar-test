@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+  <title>Tactical Armor Hand</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #05070a; overflow: hidden; font-family: system-ui, sans-serif; }
+    canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
+    video { display: none; }
+    .status {
+      position: fixed; top: 16px; left: 50%; transform: translateX(-50%); z-index: 5;
+      background: rgba(5, 12, 18, 0.75); color: #f2f4f5; border: 1px solid rgba(255, 255, 255, 0.45);
+      padding: 8px 16px; border-radius: 20px; font-size: 14px; letter-spacing: 0.5px;
+      white-space: nowrap; pointer-events: none;
+    }
+    .bar { position: fixed; bottom: 18px; left: 0; right: 0; z-index: 5; display: flex; justify-content: center; gap: 10px; }
+    .bar button, #startBtn {
+      background: rgba(12, 13, 15, 0.85); color: #f2f4f5; border: 1px solid #f2f4f5;
+      font-size: 15px; font-weight: 600; padding: 10px 16px; border-radius: 22px;
+    }
+    #start {
+      position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 18px; color: #e9ecee; text-align: center;
+      background: radial-gradient(circle at 50% 40%, #24272b, #050606 70%); padding: 24px;
+    }
+    #start h1 { margin: 0; font-size: 26px; letter-spacing: 3px; color: #ffffff; }
+    #start p { margin: 0; max-width: 320px; line-height: 1.5; color: #a9adb1; }
+    #startBtn { font-size: 18px; padding: 14px 28px; }
+  </style>
+</head>
+<body>
+  <div id="start">
+    <h1>TACTICAL ARMOR</h1>
+    <p>Show your open hand to the camera. Once your hand is detected, tactical armor will slowly lock onto it from your wrist to your fingertips.</p>
+    <button id="startBtn">Start camera</button>
+    <p id="loadMsg" style="font-size:13px"></p>
+  </div>
+
+  <canvas id="c"></canvas>
+  <video id="v" playsinline muted></video>
+  <div class="status" id="status">Loading hand tracking…</div>
+  <div class="bar">
+    <button id="flipBtn">Switch camera</button>
+    <button id="replayBtn">Replay</button>
+  </div>
+
+  <script type="module">
+    import { FilesetResolver, HandLandmarker } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.1.0/vision_bundle.mjs';
+
+    // ===== SETTINGS YOU CAN CHANGE =====
+    const DEPLOY_SECONDS = 4.0;      // how long the armor takes to cover your hand
+    const RETRACT_SECONDS = 1.2;     // how fast it disappears when your hand leaves
+    const COLORS = {
+      glow:      '#eef7ff',   // light/energy color (edges, particles, rings)
+      accent:    '#ff8a1f',   // small amber status lights
+      white:     '#f1f1ee',   // white armor plates
+      whiteMid:  '#c4c7c9',
+      whiteEdge: '#7d8186',
+      blackHi:   '#2e3135',   // matte black armor
+      blackMid:  '#141619'
+    };
+
+    // ===== SETUP =====
+    const demo = new URLSearchParams(location.search).has('demo');
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+    const video = document.getElementById('v');
+    const statusEl = document.getElementById('status');
+    let W = 0, H = 0, DPR = 1;
+    let facing = 'user';
+    let landmarker = null;
+    let lastVideoTime = -1;
+    const slots = {};          // one per detected hand ("Left" / "Right")
+    const particles = [];
+
+    function resize() {
+      DPR = Math.min(window.devicePixelRatio || 1, 2);
+      W = canvas.width = Math.round(innerWidth * DPR);
+      H = canvas.height = Math.round(innerHeight * DPR);
+    }
+    addEventListener('resize', resize);
+    resize();
+
+    // ===== SMALL MATH HELPERS =====
+    const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+    const lerp = (a, b, t) => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+    const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+    const seg = (p, start, dur) => clamp((p - start) / dur, 0, 1);
+
+    // Hand landmark numbers: 0 = wrist, 1-4 thumb, 5-8 index, 9-12 middle, 13-16 ring, 17-20 pinky
+    const FINGERS = [
+      { pts: [1, 2, 3, 4],     start: 0.28, width: 0.21 },  // thumb
+      { pts: [5, 6, 7, 8],     start: 0.38, width: 0.17 },  // index
+      { pts: [9, 10, 11, 12],  start: 0.38, width: 0.18 },  // middle
+      { pts: [13, 14, 15, 16], start: 0.40, width: 0.165 }, // ring
+      { pts: [17, 18, 19, 20], start: 0.42, width: 0.14 }   // pinky
+    ];
+    const SEG_DUR = 0.18, SEG_STEP = 0.16;
+    const PALM = [0, 1, 5, 9, 13, 17];
+    const BONES = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],
+                   [9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+
+    // ===== PARTICLES (the "nanobots") =====
+    function spawn(x, y, spread, n, speed = 60) {
+      for (let i = 0; i < n && particles.length < 900; i++) {
+        const a = Math.random() * Math.PI * 2;
+        const s = Math.random() * speed * DPR;
+        particles.push({
+          x: x + (Math.random() - 0.5) * spread, y: y + (Math.random() - 0.5) * spread,
+          vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+          life: 0, max: 0.3 + Math.random() * 0.5, size: (0.8 + Math.random() * 1.8) * DPR,
+          white: Math.random() < 0.3
+        });
+      }
+    }
+    function drawParticles(dt) {
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const q = particles[i];
+        q.life += dt;
+        if (q.life >= q.max) { particles.splice(i, 1); continue; }
+        q.x += q.vx * dt; q.y += q.vy * dt;
+        q.vx *= 0.94; q.vy *= 0.94;
+        ctx.globalAlpha = 1 - q.life / q.max;
+        ctx.fillStyle = q.white ? '#ffffff' : '#a7adb3';
+        ctx.fillRect(q.x, q.y, q.size, q.size);
+      }
+      ctx.restore();
+    }
+
+    // ===== ARMOR DRAWING (tactical black & white) =====
+    function unitDir(A, B) {
+      const d = dist(A, B) || 1;
+      return { x: (B.x - A.x) / d, y: (B.y - A.y) / d };
+    }
+
+    // A rotated rectangle centered between A and B (used for plates, bands and guards)
+    function rectPath(A, B, w) {
+      const u = unitDir(A, B), n = { x: -u.y, y: u.x }, h = w / 2;
+      ctx.beginPath();
+      ctx.moveTo(A.x + n.x * h, A.y + n.y * h);
+      ctx.lineTo(B.x + n.x * h, B.y + n.y * h);
+      ctx.lineTo(B.x - n.x * h, B.y - n.y * h);
+      ctx.lineTo(A.x - n.x * h, A.y - n.y * h);
+      ctx.closePath();
+    }
+
+    function metalGradient(A, n, w, stops) {
+      const g = ctx.createLinearGradient(A.x + n.x * w / 2, A.y + n.y * w / 2, A.x - n.x * w / 2, A.y - n.y * w / 2);
+      stops.forEach(([o, c]) => g.addColorStop(o, c));
+      return g;
+    }
+    const BLACK_STOPS = [[0, '#050607'], [0.4, COLORS.blackHi], [0.55, COLORS.blackMid], [1, '#040505']];
+    const WHITE_STOPS = [[0, COLORS.whiteEdge], [0.3, COLORS.white], [0.5, '#ffffff'], [0.75, COLORS.whiteMid], [1, COLORS.whiteEdge]];
+
+    // One finger/forearm segment: black under-armor with a white plate on top.
+    function drawPlate(A, B, w, f, t, opts = {}) {
+      if (f <= 0) return;
+      const E = lerp(A, B, f);
+      const len = dist(A, E);
+      const u = unitDir(A, B), n = { x: -u.y, y: u.x };
+
+      ctx.save();
+      if (len > 0.5) {
+        // black base layer (rounded, slightly wider)
+        ctx.lineCap = 'round';
+        ctx.strokeStyle = '#000000';
+        ctx.lineWidth = w * 1.18;
+        ctx.beginPath(); ctx.moveTo(A.x, A.y); ctx.lineTo(E.x, E.y); ctx.stroke();
+        ctx.strokeStyle = metalGradient(A, n, w * 1.08, BLACK_STOPS);
+        ctx.lineWidth = w * 1.08;
+        ctx.beginPath(); ctx.moveTo(A.x, A.y); ctx.lineTo(E.x, E.y); ctx.stroke();
+
+        // white top plate (angular, inset from both ends)
+        const s = lerp(A, E, 0.14), e = lerp(A, E, 0.86);
+        if (dist(s, e) > 2) {
+          const pw = w * (opts.plateWidth || 0.74);
+          rectPath(s, e, pw);
+          ctx.fillStyle = metalGradient(s, n, pw, WHITE_STOPS);
+          ctx.fill();
+          ctx.strokeStyle = '#0a0b0c';
+          ctx.lineWidth = Math.max(1, w * 0.05);
+          ctx.stroke();
+
+          // panel seam across the plate, plus grip ridges near the base
+          const m = lerp(s, e, 0.55);
+          ctx.beginPath();
+          ctx.moveTo(m.x + n.x * pw / 2, m.y + n.y * pw / 2);
+          ctx.lineTo(m.x - n.x * pw / 2, m.y - n.y * pw / 2);
+          for (let r = 0; r < 2; r++) {
+            const g = lerp(s, e, 0.14 + r * 0.12);
+            ctx.moveTo(g.x + n.x * pw * 0.3, g.y + n.y * pw * 0.3);
+            ctx.lineTo(g.x - n.x * pw * 0.3, g.y - n.y * pw * 0.3);
+          }
+          ctx.lineWidth = Math.max(1, w * 0.045);
+          ctx.strokeStyle = 'rgba(10,11,12,0.85)';
+          ctx.stroke();
+        }
+      }
+
+      // bright white "assembling" edge while the plate is forming
+      if (f < 1) {
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.shadowColor = COLORS.glow; ctx.shadowBlur = 16 * DPR;
+        ctx.strokeStyle = COLORS.glow;
+        ctx.lineWidth = 2 * DPR;
+        ctx.beginPath();
+        ctx.moveTo(E.x + n.x * w * 0.62, E.y + n.y * w * 0.62);
+        ctx.lineTo(E.x - n.x * w * 0.62, E.y - n.y * w * 0.62);
+        ctx.stroke();
+        spawn(E.x, E.y, w, 3);
+      }
+      ctx.restore();
+    }
+
+    // Chunky knuckle guard across the base of a finger
+    function drawGuard(P, toward, w) {
+      const u = unitDir(P, toward), n = { x: -u.y, y: u.x };
+      const A = { x: P.x - n.x * w * 0.72, y: P.y - n.y * w * 0.72 };
+      const B = { x: P.x + n.x * w * 0.72, y: P.y + n.y * w * 0.72 };
+      ctx.save();
+      ctx.lineJoin = 'round';
+      rectPath(A, B, w * 0.78);
+      ctx.fillStyle = '#060708';
+      ctx.fill();
+      rectPath(lerp(A, B, 0.08), lerp(A, B, 0.92), w * 0.5);
+      ctx.fillStyle = metalGradient(P, u, w * 0.5, WHITE_STOPS);
+      ctx.fill();
+      ctx.strokeStyle = '#0a0b0c'; ctx.lineWidth = Math.max(1, w * 0.06); ctx.stroke();
+      // two small vents
+      ctx.beginPath();
+      [0.38, 0.62].forEach(k => {
+        const c = lerp(A, B, k);
+        ctx.moveTo(c.x + u.x * w * 0.14, c.y + u.y * w * 0.14);
+        ctx.lineTo(c.x - u.x * w * 0.14, c.y - u.y * w * 0.14);
+      });
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // Small joint cap for the middle knuckles
+    function drawJoint(P, w) {
+      ctx.save();
+      ctx.fillStyle = '#08090a';
+      ctx.beginPath(); ctx.arc(P.x, P.y, w * 0.36, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = COLORS.whiteMid; ctx.lineWidth = Math.max(1, w * 0.07);
+      ctx.beginPath(); ctx.arc(P.x, P.y, w * 0.22, 0, Math.PI * 2); ctx.stroke();
+      ctx.restore();
+    }
+
+    // Small status light
+    function drawLed(c, r, color, on) {
+      ctx.save();
+      ctx.fillStyle = '#020303';
+      ctx.beginPath(); ctx.arc(c.x, c.y, r * 1.5, 0, Math.PI * 2); ctx.fill();
+      if (on) {
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.shadowColor = color; ctx.shadowBlur = 10 * DPR;
+      }
+      ctx.fillStyle = on ? color : '#26292c';
+      ctx.beginPath(); ctx.arc(c.x, c.y, r, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+    }
+
+    function drawArmor(P, slot, t) {
+      const p = slot.p;
+      const scale = dist(P[0], P[9]);
+      if (scale < 10) return;
+
+      // 1) Scanning grid while the armor is still forming
+      if (p < 1) {
+        ctx.save();
+        ctx.globalAlpha = 0.55 * (1 - p);
+        ctx.strokeStyle = COLORS.glow; ctx.lineWidth = 1.2 * DPR;
+        ctx.setLineDash([4 * DPR, 4 * DPR]);
+        ctx.beginPath();
+        BONES.forEach(([a, b]) => { ctx.moveTo(P[a].x, P[a].y); ctx.lineTo(P[b].x, P[b].y); });
+        ctx.stroke();
+        ctx.setLineDash([]);
+        P.forEach(q => {
+          ctx.strokeRect(q.x - 3 * DPR, q.y - 3 * DPR, 6 * DPR, 6 * DPR);
+        });
+        ctx.restore();
+      }
+
+      if (p > 0 && p < 0.18) spawn(P[0].x, P[0].y, scale * 0.5, 6, 90);
+
+      // 2) Wrist bracer: black cuff with white bands and status lights
+      const back = unitDir(P[9], P[0]);
+      const side = { x: -back.y, y: back.x };
+      const cuffEnd = { x: P[0].x + back.x * scale * 0.6, y: P[0].y + back.y * scale * 0.6 };
+      const fc = seg(p, 0.0, 0.16);
+      const cw = scale * 0.7;
+      if (fc > 0) {
+        const E = lerp(P[0], cuffEnd, fc);
+        ctx.save();
+        rectPath(P[0], E, cw * 1.06);
+        ctx.fillStyle = '#000'; ctx.fill();
+        rectPath(P[0], E, cw);
+        ctx.fillStyle = metalGradient(P[0], side, cw, BLACK_STOPS); ctx.fill();
+        // white bands
+        [0.2, 0.5, 0.8].forEach(k => {
+          if (fc < k + 0.08) return;
+          const a = lerp(P[0], cuffEnd, k - 0.06), b = lerp(P[0], cuffEnd, k + 0.06);
+          rectPath(a, b, cw * 0.92);
+          ctx.fillStyle = metalGradient(a, side, cw * 0.92, WHITE_STOPS); ctx.fill();
+          ctx.strokeStyle = '#0a0b0c'; ctx.lineWidth = Math.max(1, scale * 0.012); ctx.stroke();
+        });
+        ctx.restore();
+        if (fc < 1) {
+          ctx.save();
+          ctx.globalCompositeOperation = 'lighter';
+          ctx.shadowColor = COLORS.glow; ctx.shadowBlur = 16 * DPR;
+          ctx.strokeStyle = COLORS.glow; ctx.lineWidth = 2 * DPR;
+          ctx.beginPath();
+          ctx.moveTo(E.x + side.x * cw * 0.55, E.y + side.y * cw * 0.55);
+          ctx.lineTo(E.x - side.x * cw * 0.55, E.y - side.y * cw * 0.55);
+          ctx.stroke();
+          ctx.restore();
+          spawn(E.x, E.y, cw, 4);
+        }
+        // status lights along the black strips: light up one by one as the armor builds
+        if (fc >= 1) {
+          for (let k = 0; k < 4; k++) {
+            const c0 = lerp(P[0], cuffEnd, 0.35);
+            const c = { x: c0.x + side.x * cw * (-0.3 + k * 0.2), y: c0.y + side.y * cw * (-0.3 + k * 0.2) };
+            const on = p > 0.25 + k * 0.2;
+            const blink = k === 3 && p >= 1 ? (Math.sin(t * 0.008) > 0) : true;
+            drawLed(c, scale * 0.028, k === 3 ? COLORS.accent : COLORS.glow, on && blink);
+          }
+        }
+      }
+
+      // 3) Back-of-hand plate: black armor with a white angular panel
+      const fp = seg(p, 0.08, 0.3);
+      if (fp > 0) {
+        const center = { x: 0, y: 0 };
+        PALM.forEach(i => { center.x += P[i].x / PALM.length; center.y += P[i].y / PALM.length; });
+        const poly = PALM.map(i => lerp(center, P[i], 1.14));
+        const R = fp * scale * 1.35;
+
+        ctx.save();
+        ctx.beginPath();
+        poly.forEach((q, i) => i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y));
+        ctx.closePath();
+        ctx.clip();
+        ctx.beginPath(); ctx.arc(P[0].x, P[0].y, R, 0, Math.PI * 2); ctx.clip();
+
+        const g = ctx.createRadialGradient(center.x - scale * 0.15, center.y - scale * 0.2, scale * 0.05, center.x, center.y, scale * 0.95);
+        g.addColorStop(0, COLORS.blackHi);
+        g.addColorStop(0.5, COLORS.blackMid);
+        g.addColorStop(1, '#030404');
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, W, H);
+
+        // white angular panel
+        const panel = [lerp(P[0], P[5], 0.42), lerp(P[0], P[5], 0.82), lerp(P[0], P[17], 0.82), lerp(P[0], P[17], 0.42), lerp(P[0], center, 0.55)];
+        ctx.beginPath();
+        panel.forEach((q, i) => i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y));
+        ctx.closePath();
+        const pg = ctx.createLinearGradient(P[5].x, P[5].y, P[17].x, P[17].y);
+        pg.addColorStop(0, COLORS.whiteMid); pg.addColorStop(0.45, '#ffffff'); pg.addColorStop(1, COLORS.whiteEdge);
+        ctx.fillStyle = pg; ctx.fill();
+        ctx.strokeStyle = '#0a0b0c'; ctx.lineWidth = Math.max(1, scale * 0.02); ctx.stroke();
+
+        // panel seams
+        ctx.beginPath();
+        const c1 = lerp(P[0], P[9], 0.62);
+        ctx.moveTo(lerp(P[0], P[5], 0.62).x, lerp(P[0], P[5], 0.62).y); ctx.lineTo(c1.x, c1.y);
+        ctx.lineTo(lerp(P[0], P[17], 0.62).x, lerp(P[0], P[17], 0.62).y);
+        ctx.lineWidth = Math.max(1, scale * 0.016);
+        ctx.stroke();
+        ctx.restore();
+
+        // edge outline / spreading edge
+        ctx.save();
+        ctx.strokeStyle = fp < 1 ? COLORS.glow : 'rgba(255,255,255,0.35)';
+        if (fp < 1) { ctx.shadowColor = COLORS.glow; ctx.shadowBlur = 12 * DPR; }
+        ctx.lineWidth = 1.6 * DPR;
+        ctx.beginPath();
+        poly.forEach((q, i) => i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y));
+        ctx.closePath();
+        if (fp < 1) {
+          ctx.clip();
+          ctx.beginPath(); ctx.arc(P[0].x, P[0].y, R, 0, Math.PI * 2); ctx.stroke();
+          const a = Math.random() * Math.PI * 2;
+          spawn(P[0].x + Math.cos(a) * R, P[0].y + Math.sin(a) * R, scale * 0.15, 4);
+        } else {
+          ctx.stroke();
+        }
+        ctx.restore();
+
+        // Targeting ring on the back of the hand: spins up when the armor is complete
+        if (fp >= 1) {
+          const core = lerp(center, P[9], 0.08);
+          const r = scale * 0.12;
+          ctx.save();
+          ctx.fillStyle = '#050606';
+          ctx.beginPath(); ctx.arc(core.x, core.y, r * 1.25, 0, Math.PI * 2); ctx.fill();
+          const spin = p >= 1 ? t * 0.003 : 0;
+          ctx.strokeStyle = p >= 1 ? '#ffffff' : '#5c6064';
+          if (p >= 1) { ctx.shadowColor = COLORS.glow; ctx.shadowBlur = 10 * DPR; }
+          ctx.lineWidth = Math.max(1.5, r * 0.22);
+          for (let k = 0; k < 3; k++) {
+            ctx.beginPath();
+            ctx.arc(core.x, core.y, r * 0.85, spin + k * 2.094, spin + k * 2.094 + 1.4);
+            ctx.stroke();
+          }
+          drawLed(core, r * 0.25, p >= 1 ? COLORS.accent : '#26292c', p >= 1);
+          ctx.restore();
+        }
+      }
+
+      // 4) Fingers: segment by segment from the knuckles to the fingertips
+      FINGERS.forEach((fg, idx) => {
+        const w = scale * fg.width;
+        for (let k = 0; k < 3; k++) {
+          const a = P[fg.pts[k]], b = P[fg.pts[k + 1]];
+          const f = seg(p, fg.start + k * SEG_STEP, SEG_DUR);
+          drawPlate(a, b, w * (1 - k * 0.08), f, t);
+        }
+        // heavy guard on the main knuckle, small caps on the others
+        if (seg(p, fg.start, SEG_DUR) > 0.3) {
+          if (idx === 0) drawJoint(P[fg.pts[0]], w);
+          else drawGuard(P[fg.pts[0]], P[fg.pts[1]], w);
+        }
+        for (let k = 1; k < 3; k++) {
+          if (seg(p, fg.start + k * SEG_STEP, SEG_DUR) > 0.3) drawJoint(P[fg.pts[k]], w * (1 - k * 0.08));
+        }
+      });
+
+      // 5) Completion flash
+      if (slot.doneAt) {
+        const age = (t - slot.doneAt) / 700;
+        if (age < 1) {
+          const c = lerp(P[0], P[9], 0.55);
+          ctx.save();
+          ctx.globalAlpha = 1 - age;
+          ctx.strokeStyle = COLORS.glow; ctx.lineWidth = 3 * DPR;
+          ctx.shadowColor = COLORS.glow; ctx.shadowBlur = 20 * DPR;
+          ctx.beginPath(); ctx.arc(c.x, c.y, scale * (0.3 + age * 1.6), 0, Math.PI * 2); ctx.stroke();
+          ctx.restore();
+        }
+      }
+    }
+
+    // ===== CAMERA VIDEO + LANDMARK MAPPING =====
+    let view = { s: 1, ox: 0, oy: 0, dw: 0, dh: 0 };
+    function drawVideo() {
+      const vw = video.videoWidth, vh = video.videoHeight;
+      if (!vw) return false;
+      const s = Math.max(W / vw, H / vh);
+      view = { s, dw: vw * s, dh: vh * s, ox: (W - vw * s) / 2, oy: (H - vh * s) / 2 };
+      ctx.save();
+      if (facing === 'user') { ctx.translate(W, 0); ctx.scale(-1, 1); }
+      ctx.drawImage(video, view.ox, view.oy, view.dw, view.dh);
+      ctx.restore();
+      return true;
+    }
+    function toScreen(lm) {
+      let x = view.ox + lm.x * view.dw;
+      const y = view.oy + lm.y * view.dh;
+      if (facing === 'user') x = W - x;
+      return { x, y };
+    }
+
+    // ===== DEMO HAND (open with ?demo to preview without a camera) =====
+    const DEMO = [[.50,.86],[.40,.79],[.33,.71],[.28,.63],[.24,.56],[.42,.58],[.40,.45],[.39,.37],[.385,.30],
+                  [.50,.56],[.50,.42],[.50,.33],[.50,.26],[.57,.58],[.59,.46],[.60,.38],[.61,.32],
+                  [.63,.62],[.66,.53],[.68,.47],[.69,.42]];
+    function demoHand(t) {
+      const size = Math.min(W, H) * 1.1;
+      const ox = (W - size) / 2, oy = (H - size) / 2 + size * 0.03;
+      const wob = Math.sin(t * 0.0012) * 0.01;
+      return DEMO.map(([x, y], i) => ({ x: ox + (x + wob * (i > 4 ? 1 : 0.5)) * size, y: oy + (y + Math.cos(t * 0.001 + i) * 0.002) * size }));
+    }
+
+    // ===== MAIN LOOP =====
+    let prev = performance.now();
+    function loop(now) {
+      const dt = Math.min((now - prev) / 1000, 0.05);
+      prev = now;
+      ctx.clearRect(0, 0, W, H);
+
+      const seen = {};
+      if (demo) {
+        const g = ctx.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, Math.max(W, H) * 0.7);
+        g.addColorStop(0, '#3a3e43'); g.addColorStop(1, '#101214');
+        ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+        seen.Demo = demoHand(now);
+      } else if (drawVideo() && landmarker && video.currentTime !== lastVideoTime) {
+        lastVideoTime = video.currentTime;
+        const res = landmarker.detectForVideo(video, now);
+        (res.landmarks || []).forEach((hand, i) => {
+          const label = (res.handedness && res.handedness[i] && res.handedness[i][0]) ? res.handedness[i][0].categoryName : 'Hand' + i;
+          seen[label] = hand.map(toScreen);
+        });
+        lastSeen = seen;
+      } else if (!demo) {
+        Object.assign(seen, lastSeen);
+      }
+
+      let best = 0, any = false;
+      Object.keys(seen).forEach(key => {
+        const pts = seen[key];
+        const slot = slots[key] || (slots[key] = { lm: pts.map(q => ({ ...q })), p: 0, doneAt: 0 });
+        // smooth out jitter
+        slot.lm = slot.lm.map((q, i) => lerp(q, pts[i], 0.55));
+        slot.last = now;
+        slot.p = Math.min(1, slot.p + dt / DEPLOY_SECONDS);
+        if (slot.p >= 1 && !slot.doneAt) { slot.doneAt = now; spawn(slot.lm[9].x, slot.lm[9].y, 40 * DPR, 80, 260); }
+        drawArmor(slot.lm, slot, now);
+        best = Math.max(best, slot.p); any = true;
+      });
+
+      // Hands that left the view: armor retracts
+      Object.keys(slots).forEach(key => {
+        if (seen[key]) return;
+        const slot = slots[key];
+        if (now - slot.last > 250) {
+          slot.p = Math.max(0, slot.p - dt / RETRACT_SECONDS);
+          if (slot.p < 1) slot.doneAt = 0;
+        }
+      });
+
+      if (demo && best >= 1 && now - slots.Demo.doneAt > 3500) { slots.Demo.p = 0; slots.Demo.doneAt = 0; }
+
+      drawParticles(dt);
+
+      if (!landmarker && !demo) statusEl.textContent = 'Loading hand tracking…';
+      else if (!any) statusEl.textContent = '✋ Show your open hand to the camera';
+      else if (best < 1) statusEl.textContent = 'Deploying tactical armor… ' + Math.round(best * 100) + '%';
+      else statusEl.textContent = '◉ TACTICAL ARMOR ONLINE';
+
+      requestAnimationFrame(loop);
+    }
+    let lastSeen = {};
+
+    // ===== START =====
+    async function loadModel() {
+      const files = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.1.0/wasm');
+      const opts = (delegate) => ({
+        baseOptions: {
+          modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+          delegate
+        },
+        runningMode: 'VIDEO',
+        numHands: 2,
+        minHandDetectionConfidence: 0.5,
+        minHandPresenceConfidence: 0.5,
+        minTrackingConfidence: 0.5
+      });
+      try { landmarker = await HandLandmarker.createFromOptions(files, opts('GPU')); }
+      catch (e) { landmarker = await HandLandmarker.createFromOptions(files, opts('CPU')); }
+    }
+
+    async function startCamera() {
+      if (video.srcObject) video.srcObject.getTracks().forEach(tr => tr.stop());
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false
+      });
+      video.srcObject = stream;
+      await video.play();
+      lastVideoTime = -1;
+    }
+
+    const modelPromise = demo ? Promise.resolve() : loadModel().catch(err => {
+      statusEl.textContent = 'Could not load hand tracking. Check your internet and reload.';
+      console.error(err);
+    });
+
+    document.getElementById('startBtn').addEventListener('click', async () => {
+      const msg = document.getElementById('loadMsg');
+      try {
+        if (!demo) {
+          msg.textContent = 'Starting camera…';
+          await startCamera();
+          msg.textContent = 'Loading hand tracking…';
+          await modelPromise;
+        }
+        document.getElementById('start').style.display = 'none';
+      } catch (err) {
+        msg.textContent = 'Camera error: ' + err.message + '. Allow camera access and reload.';
+      }
+    });
+
+    document.getElementById('flipBtn').addEventListener('click', async () => {
+      if (demo) return;
+      facing = facing === 'user' ? 'environment' : 'user';
+      Object.keys(slots).forEach(k => delete slots[k]);
+      lastSeen = {};
+      try { await startCamera(); } catch (e) { statusEl.textContent = 'Could not switch camera'; }
+    });
+
+    document.getElementById('replayBtn').addEventListener('click', () => {
+      Object.keys(slots).forEach(k => { slots[k].p = 0; slots[k].doneAt = 0; });
+    });
+
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
