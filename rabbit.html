@@ -1,0 +1,603 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+  <title>Palm Bunny</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #0d0b0a; overflow: hidden; font-family: system-ui, sans-serif; }
+    canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; touch-action: none; }
+    video { display: none; }
+    .status {
+      position: fixed; top: 14px; left: 50%; transform: translateX(-50%); z-index: 5;
+      background: rgba(255, 250, 244, 0.88); color: #5a4030;
+      padding: 8px 16px; border-radius: 20px; font-size: 14px; font-weight: 600;
+      white-space: nowrap; pointer-events: none; box-shadow: 0 2px 10px rgba(0,0,0,0.25);
+    }
+    .bar { position: fixed; bottom: 14px; left: 0; right: 0; z-index: 5; display: flex; justify-content: center; gap: 8px; }
+    .bar button, #startBtn {
+      background: rgba(255, 250, 244, 0.9); color: #5a4030; border: none;
+      font-size: 14px; font-weight: 700; padding: 10px 16px; border-radius: 20px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.25);
+    }
+    #start {
+      position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 16px; text-align: center;
+      background: radial-gradient(circle at 50% 40%, #f6e9da, #d9bfa3 75%); padding: 24px; color: #5a4030;
+    }
+    #start h1 { margin: 0; font-size: 30px; }
+    #start p { margin: 0; max-width: 320px; line-height: 1.5; }
+    #startBtn { font-size: 18px; padding: 14px 28px; background: #5a4030; color: #fff6ec; }
+  </style>
+</head>
+<body>
+  <div id="start">
+    <h1>🐇 Palm Bunny</h1>
+    <p>Hold your hand out in front of the camera, <b>palm facing up</b>. A little bunny will hop over, climb into your hand and take a nap in your palm.</p>
+    <p style="font-size:14px">Tap the bunny to pet it!</p>
+    <button id="startBtn">Start camera</button>
+    <p id="loadMsg" style="font-size:13px"></p>
+  </div>
+
+  <canvas id="c"></canvas>
+  <video id="v" playsinline muted></video>
+  <div class="status" id="status">Loading hand tracking…</div>
+  <div class="bar">
+    <button id="flipBtn">Switch camera</button>
+    <button id="soundBtn">🔊 Sound</button>
+  </div>
+
+  <script type="module">
+    import { FilesetResolver, HandLandmarker } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.1.0/vision_bundle.mjs';
+
+    // =====================================================================
+    // SETTINGS YOU CAN CHANGE
+    // =====================================================================
+    const BUNNY_SIZE   = 1.25;  // bunny size compared to your hand (1 = about wrist-to-knuckle length)
+    const CLIMB_SPEED  = 0.9;   // how fast the bunny crawls into your hand
+    const SLEEP_AFTER  = 5;     // seconds of resting before the bunny falls asleep
+    const FUR = {
+      main:  '#c9a27e',   // fur color
+      light: '#efdcc4',   // belly / cheeks
+      dark:  '#8c6648',   // shading
+      ear:   '#f0b4b2',   // inside of ears
+      nose:  '#e7868f',
+      eye:   '#1c130e'
+    };
+
+    // =====================================================================
+    // SETUP
+    // =====================================================================
+    const demo = new URLSearchParams(location.search).has('demo');
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+    const video = document.getElementById('v');
+    const statusEl = document.getElementById('status');
+    let W = 0, H = 0, DPR = 1;
+    let facing = 'user';
+    let landmarker = null;
+    let lastVideoTime = -1;
+
+    function resize() {
+      DPR = Math.min(window.devicePixelRatio || 1, 2);
+      W = canvas.width = Math.round(innerWidth * DPR);
+      H = canvas.height = Math.round(innerHeight * DPR);
+    }
+    addEventListener('resize', resize);
+    resize();
+
+    const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+    const lerp = (a, b, t) => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+    const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+    const ease = t => t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+    const groundY = () => H - 120 * DPR;
+
+    // =====================================================================
+    // SOFT SOUNDS
+    // =====================================================================
+    let actx = null, soundOn = true;
+    function audioInit() { try { actx = actx || new (window.AudioContext || window.webkitAudioContext)(); actx.resume(); } catch (e) {} }
+    function tone(freq, dur, vol = 0.05, to = null, type = 'sine') {
+      if (!actx || !soundOn) return;
+      const t0 = actx.currentTime, o = actx.createOscillator(), g = actx.createGain();
+      o.type = type; o.frequency.setValueAtTime(freq, t0);
+      if (to) o.frequency.exponentialRampToValueAtTime(to, t0 + dur);
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(vol, t0 + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      o.connect(g).connect(actx.destination); o.start(t0); o.stop(t0 + dur + 0.05);
+    }
+    const sfx = {
+      hop:   () => tone(140, 0.08, 0.06, 90),
+      pat:   () => tone(220, 0.05, 0.025, 160),
+      happy: () => { tone(900, 0.08, 0.03, 1300); setTimeout(() => tone(1100, 0.1, 0.03, 1600), 90); },
+      yawn:  () => tone(500, 0.6, 0.02, 260, 'triangle')
+    };
+
+    // =====================================================================
+    // DRAWING THE BUNNY (side view, faces right; mirrored to face left)
+    // =====================================================================
+    function ellipse(x, y, rx, ry, rot = 0) { ctx.beginPath(); ctx.ellipse(x, y, Math.max(0.1, rx), Math.max(0.1, ry), rot, 0, Math.PI * 2); }
+    function furGradient(x, y, r) {
+      const g = ctx.createRadialGradient(x - r * 0.3, y - r * 0.5, r * 0.1, x, y, r * 1.2);
+      g.addColorStop(0, FUR.light); g.addColorStop(0.45, FUR.main); g.addColorStop(1, FUR.dark);
+      return g;
+    }
+
+    // o: { x, y, s, sx (−1..1 facing/turn), rot, crouch (0 sit → 1 curled up), hop, leg, ear, blink, sleep, breathe, nose, alert }
+    function drawBunny(o) {
+      const s = o.s, c = o.crouch, br = o.breathe || 0;
+      ctx.save();
+      ctx.translate(o.x, o.y);
+
+      // soft shadow on the ground / palm
+      ctx.save();
+      ctx.globalAlpha = 0.28 * (1 - Math.min(1, o.hop * 4));
+      ctx.fillStyle = '#000';
+      ctx.filter = 'blur(' + Math.max(1, s * 0.04) + 'px)';
+      ellipse(-0.04 * s, 0, 0.5 * s, 0.07 * s);
+      ctx.fill();
+      ctx.restore();
+
+      ctx.scale(o.sx || 1, 1);
+      ctx.rotate(o.rot || 0);
+      ctx.translate(0, -o.hop * s);
+
+      const bodyY = -0.27 * s * (1 - 0.3 * c);
+      const head = { x: 0.31 * s - 0.04 * s * c, y: -0.47 * s * (1 - 0.38 * c) + (o.alert ? -0.04 * s : 0) };
+      const hr = 0.19 * s;
+      const legSwing = Math.sin(o.leg || 0) * 0.06 * s * (1 - c);
+
+      // ears (angle: 0 = straight up, positive = laid back)
+      const earBack = (o.ear !== undefined ? o.ear : 0.35) + c * 0.75;
+      function drawEar(offx, shade, extra) {
+        const bx = head.x - 0.06 * s + offx, by = head.y - 0.12 * s;
+        const len = 0.44 * s, a = -Math.PI / 2 - earBack - extra;
+        const cx = bx + Math.cos(a) * len * 0.5, cy = by + Math.sin(a) * len * 0.5;
+        ctx.fillStyle = shade; ellipse(cx, cy, len * 0.5, 0.095 * s, a); ctx.fill();
+        ctx.fillStyle = FUR.ear; ellipse(cx + Math.cos(a) * 0.02 * s, cy + Math.sin(a) * 0.02 * s, len * 0.36, 0.045 * s, a); ctx.fill();
+      }
+      drawEar(-0.05 * s, FUR.dark, 0.12);   // back ear
+
+      // tail
+      ctx.fillStyle = '#fbf6ef';
+      ctx.shadowColor = 'rgba(0,0,0,0.25)'; ctx.shadowBlur = s * 0.04;
+      ellipse(-0.47 * s, bodyY - 0.03 * s, 0.09 * s, 0.085 * s); ctx.fill();
+      ctx.shadowBlur = 0;
+
+      // back haunch + foot
+      const hY = -0.19 * s * (1 - 0.25 * c);
+      ctx.fillStyle = furGradient(-0.24 * s, hY, 0.24 * s);
+      ellipse(-0.24 * s, hY, 0.24 * s, 0.19 * s * (1 - 0.2 * c)); ctx.fill();
+      ctx.fillStyle = FUR.light;
+      ellipse(-0.12 * s - legSwing - o.hop * 0.25 * s, -0.035 * s, 0.2 * s, 0.045 * s); ctx.fill();
+
+      // body (breathing)
+      ctx.fillStyle = furGradient(-0.02 * s, bodyY, 0.42 * s);
+      ellipse(-0.02 * s, bodyY, 0.41 * s * (1 + 0.012 * br), 0.24 * s * (1 - 0.25 * c) * (1 + 0.035 * br), -0.12 * (1 - c));
+      ctx.fill();
+      // chest
+      ctx.fillStyle = FUR.light;
+      ellipse(0.15 * s, bodyY + 0.06 * s, 0.17 * s, 0.14 * s * (1 - 0.2 * c), -0.3); ctx.fill();
+
+      // front leg + paw
+      ctx.fillStyle = FUR.main;
+      ellipse(0.2 * s + legSwing, -0.09 * s * (1 - 0.4 * c), 0.055 * s, 0.1 * s * (1 - 0.55 * c)); ctx.fill();
+      ctx.fillStyle = FUR.light;
+      ellipse(0.24 * s + legSwing, -0.025 * s, 0.075 * s, 0.035 * s); ctx.fill();
+
+      // head
+      ctx.fillStyle = furGradient(head.x, head.y, hr);
+      ellipse(head.x, head.y, hr * 1.05, hr * 0.95); ctx.fill();
+      ctx.fillStyle = FUR.light;
+      ellipse(head.x + 0.07 * s, head.y + 0.07 * s, 0.12 * s, 0.085 * s); ctx.fill();
+
+      drawEar(0.03 * s, FUR.main, -0.05);  // front ear
+
+      // eye
+      const ex = head.x + 0.07 * s, ey = head.y - 0.035 * s;
+      if (o.sleep) {
+        ctx.strokeStyle = FUR.eye; ctx.lineWidth = Math.max(1, 0.012 * s); ctx.lineCap = 'round';
+        ctx.beginPath(); ctx.arc(ex, ey - 0.01 * s, 0.035 * s, 0.25 * Math.PI, 0.85 * Math.PI); ctx.stroke();
+      } else {
+        const open = 1 - (o.blink || 0);
+        ctx.fillStyle = FUR.eye;
+        ellipse(ex, ey, 0.04 * s * (o.alert ? 1.15 : 1), 0.048 * s * Math.max(0.08, open) * (o.alert ? 1.15 : 1)); ctx.fill();
+        if (open > 0.5) {
+          ctx.fillStyle = '#ffffff';
+          ellipse(ex + 0.012 * s, ey - 0.016 * s, 0.013 * s, 0.013 * s); ctx.fill();
+        }
+      }
+      // blush
+      ctx.fillStyle = 'rgba(240,140,150,0.28)';
+      ellipse(head.x + 0.06 * s, head.y + 0.06 * s, 0.045 * s, 0.025 * s); ctx.fill();
+
+      // nose + mouth
+      const nx = head.x + 0.185 * s, ny = head.y + 0.02 * s + Math.sin(o.nose || 0) * 0.006 * s;
+      ctx.fillStyle = FUR.nose;
+      ellipse(nx, ny, 0.025 * s, 0.018 * s); ctx.fill();
+      ctx.strokeStyle = 'rgba(80,50,40,0.6)'; ctx.lineWidth = Math.max(1, 0.008 * s);
+      ctx.beginPath();
+      ctx.moveTo(nx - 0.005 * s, ny + 0.015 * s); ctx.lineTo(nx - 0.01 * s, ny + 0.04 * s);
+      ctx.stroke();
+      // whiskers
+      ctx.strokeStyle = 'rgba(255,255,255,0.65)'; ctx.lineWidth = Math.max(0.8, 0.005 * s);
+      ctx.beginPath();
+      [-0.025, 0, 0.025].forEach(k => {
+        ctx.moveTo(nx - 0.02 * s, ny + k * s);
+        ctx.lineTo(nx + 0.15 * s, ny + k * 2.2 * s + Math.sin(o.nose || 0) * 0.004 * s);
+      });
+      ctx.stroke();
+
+      ctx.restore();
+    }
+
+    // Floating hearts and Zzz
+    const floaters = [];
+    function addFloater(kind, x, y, s) {
+      floaters.push({ kind, x, y, s, t: 0, vx: (Math.random() - 0.5) * 30 * DPR, life: kind === 'z' ? 2.2 : 1.4 });
+    }
+    function drawFloaters(dt) {
+      for (let i = floaters.length - 1; i >= 0; i--) {
+        const f = floaters[i];
+        f.t += dt;
+        if (f.t >= f.life) { floaters.splice(i, 1); continue; }
+        const k = f.t / f.life;
+        ctx.save();
+        ctx.globalAlpha = k < 0.2 ? k / 0.2 : 1 - (k - 0.2) / 0.8;
+        ctx.textAlign = 'center';
+        if (f.kind === 'heart') {
+          ctx.fillStyle = '#ff6f91';
+          ctx.font = `${f.s * (0.18 + 0.1 * k)}px system-ui`;
+          ctx.fillText('♥', f.x + f.vx * f.t, f.y - f.t * 70 * DPR);
+        } else {
+          ctx.fillStyle = '#ffffff';
+          ctx.shadowColor = 'rgba(0,0,0,0.4)'; ctx.shadowBlur = 4 * DPR;
+          ctx.font = `700 ${f.s * (0.12 + 0.1 * k)}px system-ui`;
+          ctx.fillText('z', f.x + Math.sin(f.t * 3) * 10 * DPR + f.t * 18 * DPR, f.y - f.t * 45 * DPR);
+        }
+        ctx.restore();
+      }
+    }
+
+    // =====================================================================
+    // HAND HELPERS
+    // =====================================================================
+    function palmCenter(P) {
+      const c = { x: 0, y: 0 };
+      [0, 5, 9, 13, 17].forEach(i => { c.x += P[i].x / 5; c.y += P[i].y / 5; });
+      return c;
+    }
+    // The route the bunny crawls: from the ground, up the forearm, over the wrist, into the palm
+    function climbPath(P, startX) {
+      const scale = dist(P[0], P[9]);
+      const back = { x: P[0].x - P[9].x, y: P[0].y - P[9].y };
+      const bl = Math.hypot(back.x, back.y) || 1;
+      const forearm = { x: P[0].x + back.x / bl * scale * 0.9, y: P[0].y + back.y / bl * scale * 0.9 };
+      const pts = [{ x: startX, y: groundY() }];
+      if (forearm.y < groundY() - 10) pts.push(forearm);
+      pts.push(P[0]);
+      pts.push(palmCenter(P));
+      return pts;
+    }
+    function pathPoint(pts, u) {
+      for (let i = 0; i < pts.length - 1; i++) {
+        const L = dist(pts[i], pts[i + 1]);
+        if (u <= L || i === pts.length - 2) {
+          const k = clamp(u / (L || 1), 0, 1);
+          return { p: lerp(pts[i], pts[i + 1], k), dir: { x: pts[i + 1].x - pts[i].x, y: pts[i + 1].y - pts[i].y } };
+        }
+        u -= L;
+      }
+      return { p: pts[pts.length - 1], dir: { x: 1, y: 0 } };
+    }
+    const pathLength = pts => pts.slice(1).reduce((sum, q, i) => sum + dist(pts[i], q), 0);
+
+    // =====================================================================
+    // BUNNY BEHAVIOUR
+    // =====================================================================
+    const bunny = {
+      state: 'wait', x: 0, y: 0, s: 0, sx: 1, rot: 0, crouch: 0, hop: 0, leg: 0,
+      u: 0, stateT: 0, restT: 0, sleep: false, blink: 0, nextBlink: 2, ear: 0.35, earTarget: 0.35,
+      nose: 0, vy: 0, hopPhase: 0, alertT: 0, startX: 0, lastPalm: null, zT: 0
+    };
+    bunny.x = W * 0.2; bunny.y = groundY(); bunny.s = Math.min(W, H) * 0.2;
+
+    function setState(st) { bunny.state = st; bunny.stateT = 0; }
+
+    function updateBunny(hand, dt, t) {
+      const b = bunny;
+      b.stateT += dt;
+      b.nose += dt * (b.sleep ? 2 : 14);
+
+      // blinking + ear twitches
+      b.nextBlink -= dt;
+      if (b.nextBlink < 0) { b.blink = 1; b.nextBlink = 2.5 + Math.random() * 3; }
+      b.blink = Math.max(0, b.blink - dt * 7);
+      if (Math.random() < dt * 0.4) b.earTarget = 0.15 + Math.random() * 0.4;
+      b.ear += (b.earTarget - b.ear) * Math.min(1, dt * 8);
+
+      const handScale = hand ? dist(hand[0], hand[9]) : 0;
+      const targetS = hand ? handScale * BUNNY_SIZE : Math.min(W, H) * 0.2;
+      b.s += (targetS - b.s) * Math.min(1, dt * 3);
+
+      if (b.state === 'wait') {
+        // sitting on the ground, sniffing around
+        b.y = groundY(); b.hop = 0; b.rot = 0; b.crouch += (0 - b.crouch) * dt * 4;
+        b.sleep = false;
+        if (hand && b.stateT > 0.6) {
+          const ft = climbPath(hand, 0)[1] || hand[0];
+          b.startX = clamp(ft.x, 40 * DPR, W - 40 * DPR);
+          setState('approach');
+        }
+      }
+
+      else if (b.state === 'approach') {
+        if (!hand) { setState('wait'); return; }
+        const pts = climbPath(hand, b.startX);
+        b.startX = clamp(pts[1].x, 40 * DPR, W - 40 * DPR);
+        const dx = b.startX - b.x;
+        b.sx += ((dx >= 0 ? 1 : -1) - b.sx) * Math.min(1, dt * 10);
+        // hop cycle
+        const prevPhase = b.hopPhase;
+        b.hopPhase = (b.hopPhase + dt / 0.42) % 1;
+        if (b.hopPhase < prevPhase) sfx.hop();
+        b.hop = Math.sin(b.hopPhase * Math.PI) * 0.28;
+        b.x += Math.sign(dx) * Math.min(Math.abs(dx), b.s * 1.7 * dt * (0.4 + Math.sin(b.hopPhase * Math.PI)));
+        b.y = groundY(); b.rot = 0;
+        if (Math.abs(dx) < 4 * DPR) { b.hop = 0; b.u = 0; setState('climb'); }
+      }
+
+      else if (b.state === 'climb') {
+        if (!hand) { b.vy = -b.s * 2; setState('fall'); return; }
+        const pts = climbPath(hand, b.startX);
+        const L = pathLength(pts);
+        b.u += b.s * CLIMB_SPEED * dt;
+        const { p, dir } = pathPoint(pts, b.u);
+        b.x = p.x; b.y = p.y;
+        // face and tilt along the route
+        const face = dir.x >= 0 ? 1 : -1;
+        b.sx += (face - b.sx) * Math.min(1, dt * 8);
+        const ang = Math.atan2(dir.y, Math.abs(dir.x) || 0.001);
+        b.rot += (clamp(ang, -1.3, 1.3) - b.rot) * Math.min(1, dt * 6);
+        b.leg += dt * 16;
+        b.hop = Math.abs(Math.sin(b.leg * 0.5)) * 0.04;
+        b.crouch += (0.25 - b.crouch) * dt * 4;
+        if (Math.floor(b.leg / Math.PI) !== Math.floor((b.leg - dt * 16) / Math.PI)) sfx.pat();
+        if (b.u >= L) setState('settle');
+      }
+
+      else if (b.state === 'settle') {
+        if (!hand) { b.vy = -b.s * 2; setState('fall'); return; }
+        const pc = palmCenter(hand);
+        b.x += (pc.x - b.x) * Math.min(1, dt * 10); b.y += (pc.y - b.y) * Math.min(1, dt * 10);
+        b.rot += (0 - b.rot) * Math.min(1, dt * 8);
+        b.hop = 0;
+        // turn around once, then curl up
+        const k = clamp(b.stateT / 0.6, 0, 1);
+        if (b.stateT < 0.6) b.sx = Math.cos(k * Math.PI) * (b.turnFrom || (b.turnFrom = Math.sign(b.sx) || 1));
+        else b.crouch += (1 - b.crouch) * Math.min(1, dt * 3);
+        if (b.stateT > 1.6) { b.turnFrom = 0; b.restT = 0; setState('rest'); sfx.yawn(); }
+      }
+
+      else if (b.state === 'rest') {
+        if (!hand) { b.vy = -b.s * 2; b.sleep = false; setState('fall'); return; }
+        const pc = palmCenter(hand);
+        // hand moving fast? the bunny wakes up and holds on
+        const speed = b.lastPalm ? dist(pc, b.lastPalm) / Math.max(dt, 0.001) : 0;
+        b.lastPalm = pc;
+        if (speed > handScale * 3.5) { b.alertT = 1.2; if (b.sleep) { b.sleep = false; b.restT = 0; } }
+        b.alertT = Math.max(0, b.alertT - dt);
+        b.x += (pc.x - b.x) * Math.min(1, dt * 12); b.y += (pc.y - b.y) * Math.min(1, dt * 12);
+        b.rot += (0 - b.rot) * Math.min(1, dt * 6);
+        b.crouch += ((b.alertT > 0 ? 0.55 : 1) - b.crouch) * Math.min(1, dt * 5);
+        if (b.alertT > 0) b.earTarget = -0.1;
+        b.hop = Math.max(0, b.hop - dt * 1.5);
+        b.restT += dt;
+        if (!b.sleep && b.restT > SLEEP_AFTER && b.alertT <= 0) b.sleep = true;
+        if (b.sleep) {
+          b.zT -= dt;
+          if (b.zT < 0) { addFloater('z', b.x + b.sx * b.s * 0.3, b.y - b.s * 0.45, b.s); b.zT = 1.1; }
+        }
+      }
+
+      else if (b.state === 'fall') {
+        // hand disappeared: hop down to the ground
+        b.vy += b.s * 9 * dt;
+        b.y += b.vy * dt;
+        b.rot *= 0.9; b.crouch += (0 - b.crouch) * dt * 5; b.sleep = false;
+        b.x = clamp(b.x, 40 * DPR, W - 40 * DPR);
+        if (b.y >= groundY()) { b.y = groundY(); b.vy = 0; sfx.hop(); setState('wait'); }
+      }
+
+      // breathing (slower and deeper while asleep)
+      b.breathe = Math.sin(t * (b.sleep ? 2.2 : 4.5));
+    }
+
+    function petBunny(px, py) {
+      const b = bunny;
+      if (Math.hypot(px - b.x, py - (b.y - b.s * 0.3)) > b.s * 0.7) return;
+      for (let i = 0; i < 5; i++) addFloater('heart', b.x + (Math.random() - 0.5) * b.s * 0.6, b.y - b.s * 0.5, b.s);
+      sfx.happy();
+      b.sleep = false; b.restT = 0; b.blink = 0;
+      if (b.state === 'rest') b.hop = 0.18;
+    }
+
+    // =====================================================================
+    // CAMERA + LANDMARKS
+    // =====================================================================
+    let view = { s: 1, ox: 0, oy: 0, dw: 0, dh: 0 };
+    function drawVideo() {
+      const vw = video.videoWidth, vh = video.videoHeight;
+      if (!vw) return false;
+      const s = Math.max(W / vw, H / vh);
+      view = { s, dw: vw * s, dh: vh * s, ox: (W - vw * s) / 2, oy: (H - vh * s) / 2 };
+      ctx.save();
+      if (facing === 'user') { ctx.translate(W, 0); ctx.scale(-1, 1); }
+      ctx.drawImage(video, view.ox, view.oy, view.dw, view.dh);
+      ctx.restore();
+      return true;
+    }
+    function toScreen(lm) {
+      let x = view.ox + lm.x * view.dw;
+      const y = view.oy + lm.y * view.dh;
+      if (facing === 'user') x = W - x;
+      return { x, y };
+    }
+
+    // =====================================================================
+    // DEMO MODE (?demo): a drawn hand appears, moves gently, then leaves
+    // =====================================================================
+    const DEMO_HAND = [[.50,.86],[.40,.79],[.33,.71],[.28,.63],[.24,.56],[.42,.58],[.40,.45],[.39,.37],[.385,.30],
+                       [.50,.56],[.50,.42],[.50,.33],[.50,.26],[.57,.58],[.59,.46],[.60,.38],[.61,.32],
+                       [.63,.62],[.66,.53],[.68,.47],[.69,.42]];
+    const demoState = { clock: 0 };
+    function demoHand(t) {
+      const ph = demoState.clock % 34;
+      if (ph < 1.5 || (ph > 26 && ph < 29)) return null;   // hand missing at the start and once later
+      const size = Math.min(W, H) * 0.7;
+      const ox = (W - size) / 2 + Math.sin(demoState.clock * 0.5) * 10 * DPR;
+      const oy = H * 0.22 + Math.cos(demoState.clock * 0.4) * 6 * DPR;
+      // a quick shake at ~20s to wake the bunny
+      const shake = ph > 20 && ph < 20.8 ? Math.sin(ph * 60) * 25 * DPR : 0;
+      return DEMO_HAND.map(([x, y]) => ({ x: ox + x * size + shake, y: oy + y * size }));
+    }
+    function drawDemoHand(P) {
+      ctx.save();
+      ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      const s = dist(P[0], P[9]);
+      const back = { x: P[0].x - P[9].x, y: P[0].y - P[9].y }, bl = Math.hypot(back.x, back.y);
+      const arm = { x: P[0].x + back.x / bl * H, y: P[0].y + back.y / bl * H };
+      ctx.strokeStyle = '#e0ac8a'; ctx.lineWidth = s * 0.75;
+      ctx.beginPath(); ctx.moveTo(P[0].x, P[0].y); ctx.lineTo(arm.x, arm.y); ctx.stroke();
+      ctx.fillStyle = '#e8b896';
+      ctx.beginPath(); [0, 1, 5, 9, 13, 17].forEach((i, k) => k ? ctx.lineTo(P[i].x, P[i].y) : ctx.moveTo(P[i].x, P[i].y)); ctx.closePath();
+      ctx.lineWidth = s * 0.25; ctx.strokeStyle = '#e8b896'; ctx.fill(); ctx.stroke();
+      [[1,2,3,4],[5,6,7,8],[9,10,11,12],[13,14,15,16],[17,18,19,20]].forEach((f, i) => {
+        ctx.lineWidth = s * (i === 0 ? 0.2 : i === 4 ? 0.14 : 0.17);
+        ctx.beginPath(); f.forEach((k, j) => j ? ctx.lineTo(P[k].x, P[k].y) : ctx.moveTo(P[k].x, P[k].y)); ctx.stroke();
+      });
+      ctx.fillStyle = 'rgba(190,120,95,0.25)';
+      const pc = palmCenter(P);
+      ellipse(pc.x, pc.y, s * 0.35, s * 0.3); ctx.fill();
+      ctx.restore();
+    }
+
+    // =====================================================================
+    // MAIN LOOP
+    // =====================================================================
+    let smoothHand = null, lastSeenAt = 0, lastLm = null;
+    let prev = performance.now();
+    function loop(now) {
+      const dt = Math.min((now - prev) / 1000, 0.05);
+      prev = now;
+      const t = now / 1000;
+      ctx.clearRect(0, 0, W, H);
+
+      let raw = null;
+      if (demo) {
+        demoState.clock += dt;
+        const g = ctx.createLinearGradient(0, 0, 0, H);
+        g.addColorStop(0, '#5b6b5a'); g.addColorStop(0.75, '#8f9b7c'); g.addColorStop(0.751, '#7b6a52'); g.addColorStop(1, '#5e4f3c');
+        ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+        raw = demoHand(t);
+        if (raw) drawDemoHand(raw);
+      } else if (drawVideo() && landmarker) {
+        if (video.currentTime !== lastVideoTime) {
+          lastVideoTime = video.currentTime;
+          const res = landmarker.detectForVideo(video, now);
+          lastLm = (res.landmarks && res.landmarks[0]) ? res.landmarks[0].map(toScreen) : null;
+        }
+        raw = lastLm;
+      }
+
+      // smooth the hand and allow brief tracking dropouts
+      if (raw) {
+        smoothHand = smoothHand ? smoothHand.map((q, i) => lerp(q, raw[i], 0.5)) : raw.map(q => ({ ...q }));
+        lastSeenAt = now;
+      } else if (now - lastSeenAt > 400) {
+        smoothHand = null;
+      }
+
+      updateBunny(smoothHand, dt, t);
+      drawBunny({
+        x: bunny.x, y: bunny.y, s: bunny.s, sx: bunny.sx, rot: bunny.rot, crouch: bunny.crouch,
+        hop: bunny.hop, leg: bunny.leg, ear: bunny.ear, blink: bunny.blink, sleep: bunny.sleep,
+        breathe: bunny.breathe, nose: bunny.nose, alert: bunny.alertT > 0
+      });
+      drawFloaters(dt);
+
+      const st = bunny.state;
+      if (!landmarker && !demo) statusEl.textContent = 'Loading hand tracking…';
+      else if (!smoothHand && st === 'wait') statusEl.textContent = '✋ Hold out your hand, palm up';
+      else if (st === 'approach' || st === 'wait') statusEl.textContent = '🐇 Here it comes…';
+      else if (st === 'climb') statusEl.textContent = '🐾 Climbing into your hand…';
+      else if (st === 'settle') statusEl.textContent = '🐇 Getting comfy…';
+      else if (st === 'rest') statusEl.textContent = bunny.alertT > 0 ? '😮 Whoa! Holding on…' : bunny.sleep ? '💤 Sleeping in your palm — tap to pet' : '🐇 Resting in your palm — tap to pet';
+      else if (st === 'fall') statusEl.textContent = '🐇 Hop!';
+
+      requestAnimationFrame(loop);
+    }
+
+    // =====================================================================
+    // START + BUTTONS
+    // =====================================================================
+    async function loadModel() {
+      const files = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.1.0/wasm');
+      const opts = (delegate) => ({
+        baseOptions: {
+          modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+          delegate
+        },
+        runningMode: 'VIDEO', numHands: 1,
+        minHandDetectionConfidence: 0.5, minHandPresenceConfidence: 0.5, minTrackingConfidence: 0.5
+      });
+      try { landmarker = await HandLandmarker.createFromOptions(files, opts('GPU')); }
+      catch (e) { landmarker = await HandLandmarker.createFromOptions(files, opts('CPU')); }
+    }
+    async function startCamera() {
+      if (video.srcObject) video.srcObject.getTracks().forEach(tr => tr.stop());
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false
+      });
+      video.srcObject = stream;
+      await video.play();
+      lastVideoTime = -1;
+    }
+    const modelPromise = demo ? Promise.resolve() : loadModel().catch(err => {
+      statusEl.textContent = 'Could not load hand tracking. Check your internet and reload.';
+      console.error(err);
+    });
+
+    document.getElementById('startBtn').addEventListener('click', async () => {
+      audioInit();
+      const msg = document.getElementById('loadMsg');
+      try {
+        if (!demo) {
+          msg.textContent = 'Starting camera…';
+          await startCamera();
+          msg.textContent = 'Loading hand tracking…';
+          await modelPromise;
+        }
+        document.getElementById('start').style.display = 'none';
+      } catch (err) {
+        msg.textContent = 'Camera error: ' + err.message + '. Allow camera access and reload.';
+      }
+    });
+    document.getElementById('flipBtn').addEventListener('click', async () => {
+      if (demo) return;
+      facing = facing === 'user' ? 'environment' : 'user';
+      lastLm = null;
+      try { await startCamera(); } catch (e) { statusEl.textContent = 'Could not switch camera'; }
+    });
+    document.getElementById('soundBtn').addEventListener('click', function () {
+      audioInit(); soundOn = !soundOn;
+      this.textContent = soundOn ? '🔊 Sound' : '🔇 Muted';
+    });
+    canvas.addEventListener('pointerdown', e => petBunny(e.clientX * DPR, e.clientY * DPR));
+
+    if (demo) window.__demo = demoState;
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
