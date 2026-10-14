@@ -1,0 +1,1065 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+  <title>Animal Scanner</title>
+  <style>
+    :root { --green: #2f7d4f; --ink: #1f2a24; --muted: #5d6b63; --card: #ffffff; }
+    html, body { margin: 0; height: 100%; background: #0b0f0d; overflow: hidden; font-family: system-ui, -apple-system, sans-serif; color: var(--ink); }
+    #cam { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
+    video { display: none; }
+    #view3d { position: fixed; left: 0; right: 0; top: 56px; height: 40vh; display: none; touch-action: none; cursor: grab; }
+    #view3d canvas { width: 100%; height: 100%; display: block; }
+    #loading3d { position: absolute; left: 50%; top: 45%; transform: translate(-50%, -50%); background: rgba(255,255,255,0.9);
+      padding: 8px 14px; border-radius: 16px; font-size: 13px; font-weight: 600; display: none; pointer-events: none; }
+    #credit { position: absolute; right: 10px; bottom: 6px; font-size: 11px; color: rgba(255,255,255,0.9);
+      text-shadow: 0 1px 3px rgba(0,0,0,0.8); pointer-events: none; max-width: 70%; text-align: right; }
+    body.showing #view3d { display: block; }
+
+    .status {
+      position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 6;
+      background: rgba(255,255,255,0.92); color: var(--ink); padding: 8px 16px; border-radius: 20px;
+      font-size: 14px; font-weight: 600; white-space: nowrap; box-shadow: 0 2px 12px rgba(0,0,0,0.25); pointer-events: none;
+    }
+    #reticle { position: fixed; left: 50%; top: 46%; width: 62vmin; height: 62vmin; transform: translate(-50%, -50%); pointer-events: none; z-index: 2; }
+    #reticle .c { position: absolute; width: 34px; height: 34px; border: 4px solid #fff; border-radius: 6px; filter: drop-shadow(0 1px 3px rgba(0,0,0,0.5)); }
+    #reticle .tl { top: 0; left: 0; border-right: none; border-bottom: none; }
+    #reticle .tr { top: 0; right: 0; border-left: none; border-bottom: none; }
+    #reticle .bl { bottom: 0; left: 0; border-right: none; border-top: none; }
+    #reticle .br { bottom: 0; right: 0; border-left: none; border-top: none; }
+    #reticle .line { position: absolute; left: 8px; right: 8px; height: 3px; border-radius: 2px; background: #7dffad;
+      box-shadow: 0 0 14px 2px rgba(125,255,173,0.8); animation: sweep 2.2s ease-in-out infinite alternate; }
+    @keyframes sweep { from { top: 6%; } to { top: 92%; } }
+    #reticle { transition: opacity 0.3s; }
+    body.detecting #reticle { opacity: 0.2; }
+    body.showing #reticle { display: none; }
+
+    .bar { position: fixed; bottom: 16px; left: 0; right: 0; z-index: 4; display: flex; justify-content: center; gap: 10px; }
+    body.showing .bar { display: none; }
+    button { font: inherit; cursor: pointer; }
+    .pill { background: rgba(255,255,255,0.92); color: var(--ink); border: none; font-size: 15px; font-weight: 700;
+      padding: 11px 18px; border-radius: 22px; box-shadow: 0 2px 12px rgba(0,0,0,0.25); }
+
+    #card {
+      position: fixed; left: 0; right: 0; bottom: 0; z-index: 5; background: var(--card);
+      border-radius: 22px 22px 0 0; box-shadow: 0 -6px 30px rgba(0,0,0,0.3);
+      padding: 10px 18px 16px; max-height: 54vh; overflow-y: auto; box-sizing: border-box;
+      transform: translateY(105%); transition: transform 0.45s cubic-bezier(.2,.9,.25,1.1);
+      max-width: 640px; margin: 0 auto;
+    }
+    body.showing #card { transform: translateY(0); }
+    .grab { width: 42px; height: 5px; border-radius: 3px; background: #d5dbd7; margin: 0 auto 10px; }
+    .chead { display: flex; align-items: center; gap: 12px; }
+    #cEmoji { font-size: 36px; line-height: 1; }
+    #cName { margin: 0; font-size: 26px; letter-spacing: 0.2px; }
+    #cSci { color: var(--muted); font-style: italic; font-size: 14px; }
+    #cConf { margin-left: auto; background: #e6f4ea; color: var(--green); font-weight: 700; font-size: 12px; padding: 5px 10px; border-radius: 12px; white-space: nowrap; }
+    #cDef { margin: 12px 0; line-height: 1.5; font-size: 15.5px; }
+    .facts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .facts div { background: #f3f6f4; border-radius: 12px; padding: 8px 10px; font-size: 13.5px; }
+    .facts b { display: block; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; margin-bottom: 2px; }
+    .fun { margin-top: 10px; background: #fff7e0; border-radius: 12px; padding: 9px 12px; font-size: 14px; line-height: 1.4; }
+    .actions { display: flex; gap: 8px; margin-top: 12px; }
+    .actions button { flex: 1; border: none; border-radius: 14px; padding: 12px 8px; font-weight: 700; font-size: 14.5px; }
+    #speakBtn { background: #e6f4ea; color: var(--green); }
+    #rescanBtn { background: var(--green); color: #fff; }
+    #listBtn2 { flex: 0 0 52px; background: #f3f6f4; }
+
+    #list { position: fixed; inset: 0; z-index: 8; background: rgba(0,0,0,0.55); display: none; align-items: flex-end; justify-content: center; }
+    #list.open { display: flex; }
+    #list .sheet { background: #fff; width: 100%; max-width: 640px; border-radius: 22px 22px 0 0; padding: 18px; box-sizing: border-box; }
+    #list h3 { margin: 0 0 12px; }
+    #list .grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
+    #list .grid button { border: none; background: #f3f6f4; border-radius: 14px; padding: 10px 2px; font-size: 26px; }
+    #list .grid button span { display: block; font-size: 11px; font-weight: 600; margin-top: 2px; color: var(--ink); }
+    #list .close { margin-top: 12px; width: 100%; border: none; background: #e9ecea; border-radius: 14px; padding: 12px; font-weight: 700; }
+
+    #start { position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 14px; text-align: center; padding: 24px; background: radial-gradient(circle at 50% 35%, #e9f6ec, #b9dcc4 75%); }
+    #start h1 { margin: 0; font-size: 30px; color: var(--green); }
+    #start p { margin: 0; max-width: 340px; line-height: 1.5; color: #2c3a32; }
+    #start .emojis { font-size: 28px; letter-spacing: 4px; }
+    #startBtn { background: var(--green); color: #fff; border: none; font-size: 18px; font-weight: 700; padding: 14px 30px; border-radius: 24px; }
+  </style>
+</head>
+<body>
+  <div id="start">
+    <h1>🔍 Animal Scanner</h1>
+    <div class="emojis">🐕🐈🐎🐑🐄🐘🐻🦓🦒🐦</div>
+    <p>Point your camera at an animal — a real one, a toy, or a picture in a book or on a screen. When it's recognized you'll see what it is and a 3D model of it.</p>
+    <button id="startBtn">Start scanning</button>
+    <p id="loadMsg" style="font-size:13px"></p>
+  </div>
+
+  <canvas id="cam"></canvas>
+  <video id="v" playsinline muted></video>
+  <div id="reticle"><i class="c tl"></i><i class="c tr"></i><i class="c bl"></i><i class="c br"></i><i class="line"></i></div>
+  <div class="status" id="status">Loading…</div>
+  <div id="view3d"><div id="loading3d">Loading 3D model…</div><div id="credit"></div></div>
+
+  <div class="bar">
+    <button class="pill" id="listBtn">📖 Animals</button>
+    <button class="pill" id="flipBtn">🔄 Camera</button>
+  </div>
+
+  <div id="card">
+    <div class="grab"></div>
+    <div class="chead">
+      <span id="cEmoji"></span>
+      <div><h2 id="cName"></h2><div id="cSci"></div></div>
+      <span id="cConf"></span>
+    </div>
+    <p id="cDef"></p>
+    <div class="facts">
+      <div><b>Class</b><span id="fClass"></span></div>
+      <div><b>Diet</b><span id="fDiet"></span></div>
+      <div><b>Habitat</b><span id="fHab"></span></div>
+      <div><b>Lifespan</b><span id="fLife"></span></div>
+    </div>
+    <div class="fun">💡 <span id="cFact"></span></div>
+    <div class="actions">
+      <button id="speakBtn">🔊 Read aloud</button>
+      <button id="rescanBtn">🔍 Scan again</button>
+      <button id="listBtn2" aria-label="Browse animals">📖</button>
+    </div>
+  </div>
+
+  <div id="list"><div class="sheet"><h3>Browse animals</h3><div class="grid" id="grid"></div><button class="close" id="closeList">Close</button></div></div>
+
+  <script type="importmap">
+    { "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+    } }
+  </script>
+  <script type="module">
+    import * as THREE from 'three';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+    import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+    import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+    import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+    import { FilesetResolver, ObjectDetector } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.1.0/vision_bundle.mjs';
+
+    // =====================================================================
+    // ANIMAL INFORMATION (edit the text here)
+    // =====================================================================
+    const ANIMALS = {
+      dog: { name: 'Dog', emoji: '🐕', sci: 'Canis familiaris', cls: 'Mammal', diet: 'Omnivore', habitat: 'Worldwide, alongside humans', life: '10–13 years',
+        def: 'A domesticated mammal descended from wolves, kept as a companion, guard or working animal. Dogs have an excellent sense of smell and hearing, and were the first animals ever domesticated by humans.',
+        fact: "A dog's nose print is unique, just like a human fingerprint." },
+      cat: { name: 'Cat', emoji: '🐈', sci: 'Felis catus', cls: 'Mammal', diet: 'Carnivore', habitat: 'Homes worldwide', life: '12–18 years',
+        def: 'A small domesticated carnivorous mammal with soft fur, sharp retractable claws and keen night vision. Cats are skilled hunters and have lived alongside humans for thousands of years.',
+        fact: 'Cats sleep around 12 to 16 hours a day.' },
+      horse: { name: 'Horse', emoji: '🐎', sci: 'Equus caballus', cls: 'Mammal', diet: 'Herbivore', habitat: 'Grasslands and farms worldwide', life: '25–30 years',
+        def: 'A large, strong hoofed mammal with a long mane and tail. Horses have been domesticated for thousands of years for riding, farm work and transport.',
+        fact: 'Horses can sleep both standing up and lying down.' },
+      sheep: { name: 'Sheep', emoji: '🐑', sci: 'Ovis aries', cls: 'Mammal', diet: 'Herbivore', habitat: 'Farms and grasslands worldwide', life: '10–12 years',
+        def: 'A domesticated grazing mammal with a thick woolly coat. Sheep are raised for their wool, milk and meat, and usually live together in flocks.',
+        fact: 'Sheep have rectangular pupils that give them a very wide field of view.' },
+      cow: { name: 'Cow', emoji: '🐄', sci: 'Bos taurus', cls: 'Mammal', diet: 'Herbivore', habitat: 'Farms and pastures worldwide', life: '18–22 years',
+        def: 'A large domesticated hoofed mammal raised for milk, meat and leather. Cows are ruminants — their stomach has four compartments to help digest grass.',
+        fact: 'Cows spend up to 8 hours a day chewing their cud.' },
+      elephant: { name: 'Elephant', emoji: '🐘', sci: 'Family Elephantidae', cls: 'Mammal', diet: 'Herbivore', habitat: 'Savannas and forests of Africa and Asia', life: '60–70 years',
+        def: 'The largest living land animal, with a long flexible trunk, large ears and ivory tusks. Elephants live in close family herds led by the oldest female.',
+        fact: "An elephant's trunk contains tens of thousands of muscles." },
+      bear: { name: 'Bear', emoji: '🐻', sci: 'Family Ursidae', cls: 'Mammal', diet: 'Omnivore (most species)', habitat: 'Forests, mountains and the Arctic', life: '20–30 years',
+        def: 'A large, heavy mammal with thick fur, a short tail and powerful claws. Bears have an excellent sense of smell and can stand up on their hind legs.',
+        fact: 'Many bears hibernate through winter, living off their stored body fat.' },
+      zebra: { name: 'Zebra', emoji: '🦓', sci: 'Equus quagga (plains zebra)', cls: 'Mammal', diet: 'Herbivore', habitat: 'Grasslands and savannas of Africa', life: '20–25 years',
+        def: 'A wild African member of the horse family, famous for its black-and-white striped coat. Zebras live in herds and graze on grasses.',
+        fact: 'No two zebras have exactly the same stripe pattern.' },
+      giraffe: { name: 'Giraffe', emoji: '🦒', sci: 'Giraffa camelopardalis', cls: 'Mammal', diet: 'Herbivore', habitat: 'Savannas and woodlands of Africa', life: '20–25 years',
+        def: 'The tallest living land animal, with an extremely long neck and legs and a patterned coat. Giraffes use their height to eat leaves from tall trees.',
+        fact: "A giraffe's tongue can be about 45 cm (18 in) long." },
+      bird: { name: 'Bird', emoji: '🐦', sci: 'Class Aves', cls: 'Bird', diet: 'Varies by species', habitat: 'Every continent on Earth', life: 'Varies by species',
+        def: 'A warm-blooded animal with feathers, wings and a beak that lays hard-shelled eggs. Most birds can fly, and there are over 10,000 species.',
+        fact: 'Birds are the living descendants of dinosaurs.' }
+    };
+    // =====================================================================
+    // REALISTIC 3D MODELS
+    // Put a .glb file for each animal next to animals.html (same folder) with
+    // the file name below. If a file is missing, the simple built-in model is shown.
+    //   rotY   = turn the model if it faces the wrong way (degrees, e.g. 90 or -90)
+    //   anim   = part of the animation name to play (e.g. 'idle'); blank = automatic
+    //   credit = who made the model (required by CC-BY licences)
+    // =====================================================================
+    const MODELS = {
+      dog:      { file: 'dog.glb',      rotY: 0, anim: '', credit: '' },
+      cat:      { file: 'cat.glb',      rotY: 0, anim: '', credit: '' },
+      horse:    { file: 'horse.glb',    rotY: 0, anim: '', credit: '' },
+      sheep:    { file: 'sheep.glb',    rotY: 0, anim: '', credit: '' },
+      cow:      { file: 'cow.glb',      rotY: 0, anim: '', credit: '' },
+      elephant: { file: 'elephant.glb', rotY: 0, anim: '', credit: '' },
+      bear:     { file: 'bear.glb',     rotY: 0, anim: '', credit: '' },
+      zebra:    { file: 'zebra.glb',    rotY: 0, anim: '', credit: '' },
+      giraffe:  { file: 'giraffe.glb',  rotY: 0, anim: '', credit: '' },
+      bird:     { file: 'bird.glb',     rotY: 0, anim: '', credit: '' }
+    };
+    const ORDER = ['dog', 'cat', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe', 'bird'];
+    const MIN_SCORE = 0.45;   // how confident the detector must be (0–1)
+
+    // =====================================================================
+    // 3D: SCENE
+    // =====================================================================
+    const view = document.getElementById('view3d');
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
+    view.appendChild(renderer.domElement);
+    const scene = new THREE.Scene();
+    const camera3 = new THREE.PerspectiveCamera(32, 1, 0.1, 100);
+    camera3.position.set(0, 1.8, 6.2);
+    camera3.lookAt(0, 1.05, 0);
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.05;
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    // soft studio-style reflections/lighting for realistic materials
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    scene.environment = pmrem.fromScene(new RoomEnvironment(renderer), 0.04).texture;
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x4a5a4f, 0.9));
+    const sun = new THREE.DirectionalLight(0xffffff, 2.6); sun.position.set(3, 6, 4); scene.add(sun);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(1024, 1024);
+    Object.assign(sun.shadow.camera, { left: -3, right: 3, top: 3, bottom: -3, near: 0.5, far: 20 });
+    sun.shadow.bias = -0.0005; sun.shadow.normalBias = 0.02;
+    // invisible floor that only shows the shadow (so it sits on top of the camera image)
+    const shadowCatcher = new THREE.Mesh(new THREE.PlaneGeometry(12, 12), new THREE.ShadowMaterial({ opacity: 0.38 }));
+    shadowCatcher.rotation.x = -Math.PI / 2; shadowCatcher.position.y = 0.002; shadowCatcher.receiveShadow = true;
+    scene.add(shadowCatcher);
+    const fill = new THREE.DirectionalLight(0xbfd8ff, 0.8); fill.position.set(-4, 2, -3); scene.add(fill);
+
+    // glowing pedestal under the animal
+    function radialTex(stops) {
+      const c = document.createElement('canvas'); c.width = c.height = 256;
+      const g = c.getContext('2d'), gr = g.createRadialGradient(128, 128, 0, 128, 128, 128);
+      stops.forEach(([o, col]) => gr.addColorStop(o, col));
+      g.fillStyle = gr; g.fillRect(0, 0, 256, 256);
+      const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+    }
+    const pedestal = new THREE.Group();
+    const shadowMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1),
+      new THREE.MeshBasicMaterial({ map: radialTex([[0, 'rgba(0,0,0,0.3)'], [0.6, 'rgba(0,0,0,0.12)'], [1, 'rgba(0,0,0,0)']]), transparent: true, depthWrite: false }));
+    shadowMesh.rotation.x = -Math.PI / 2; shadowMesh.scale.set(3.4, 2.2, 1);
+    const glowMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1),
+      new THREE.MeshBasicMaterial({ map: radialTex([[0, 'rgba(120,255,170,0)'], [0.82, 'rgba(120,255,170,0.05)'], [0.93, 'rgba(150,255,190,0.75)'], [1, 'rgba(120,255,170,0)']]),
+        transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
+    glowMesh.rotation.x = -Math.PI / 2; glowMesh.position.y = 0.005; glowMesh.scale.set(3.6, 3.6, 1);
+    pedestal.add(shadowMesh, glowMesh);
+    scene.add(pedestal);
+
+    // =====================================================================
+    // 3D: BUILDING BLOCKS
+    // =====================================================================
+    function canvasTex(w, h, draw) {
+      const c = document.createElement('canvas'); c.width = w; c.height = h;
+      draw(c.getContext('2d'), w, h);
+      const t = new THREE.CanvasTexture(c);
+      t.colorSpace = THREE.SRGBColorSpace; t.wrapS = t.wrapT = THREE.RepeatWrapping; t.anisotropy = 4;
+      return t;
+    }
+    function rng(seed) { return () => { seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; }; }
+    // wraps a blob drawing around the texture edges so patterns tile seamlessly
+    function wrapDraw(w, h, x, y, fn) { for (const dx of [-w, 0, w]) for (const dy of [-h, 0, h]) fn(x + dx, y + dy); }
+
+    const TEX = {};
+    TEX.grain = canvasTex(256, 256, (g, w, h) => {
+      g.fillStyle = '#fff'; g.fillRect(0, 0, w, h);
+      const r = rng(7);
+      for (let i = 0; i < 2600; i++) {
+        const v = 205 + Math.floor(r() * 50);
+        g.strokeStyle = `rgb(${v},${v},${v})`; g.lineWidth = 1;
+        const x = r() * w, y = r() * h, a = r() * 0.6 - 0.3;
+        g.beginPath(); g.moveTo(x, y); g.lineTo(x + Math.cos(a) * 5, y + Math.sin(a) * 5 + 3); g.stroke();
+      }
+    });
+    TEX.wrinkle = canvasTex(512, 512, (g, w, h) => {
+      // cracked, leathery elephant skin
+      g.fillStyle = '#fff'; g.fillRect(0, 0, w, h);
+      const r = rng(11);
+      for (let i = 0; i < 9000; i++) {   // mottled base
+        const v = 215 + Math.floor(r() * 40);
+        g.fillStyle = `rgb(${v},${v},${v})`; g.fillRect(r() * w, r() * h, 2 + r() * 4, 2 + r() * 4);
+      }
+      for (let i = 0; i < 900; i++) {    // network of creases in many directions
+        const x = r() * w, y = r() * h, a = (r() < 0.6 ? 0 : Math.PI / 2) + (r() - 0.5) * 1.2, len = 8 + r() * 26;
+        const v = 120 + Math.floor(r() * 70);
+        wrapDraw(w, h, x, y, (px, py) => {
+          g.strokeStyle = `rgba(${v},${v},${v},0.7)`; g.lineWidth = 0.8 + r() * 1.4;
+          g.beginPath(); g.moveTo(px, py);
+          g.quadraticCurveTo(px + Math.cos(a) * len * 0.5 + (r() - 0.5) * 6, py + Math.sin(a) * len * 0.5 + (r() - 0.5) * 6, px + Math.cos(a) * len, py + Math.sin(a) * len);
+          g.stroke();
+        });
+      }
+    });
+    TEX.zebra = canvasTex(512, 512, (g, w, h) => {
+      g.fillStyle = '#f2efe8'; g.fillRect(0, 0, w, h);
+      g.fillStyle = '#141414';
+      const n = 13;
+      for (let i = 0; i < n; i++) {
+        const y0 = (i + 0.5) * h / n, th = 11 + (i % 3) * 3;
+        g.beginPath();
+        for (let x = 0; x <= w; x += 8) g.lineTo(x, y0 + Math.sin(x / w * Math.PI * 4 + i) * 7 - th);
+        for (let x = w; x >= 0; x -= 8) g.lineTo(x, y0 + Math.sin(x / w * Math.PI * 4 + i) * 7 + th);
+        g.closePath(); g.fill();
+      }
+    });
+    TEX.giraffe = canvasTex(512, 512, (g, w, h) => {
+      g.fillStyle = '#f2dfb6'; g.fillRect(0, 0, w, h);
+      g.fillStyle = '#a5582a';
+      const r = rng(3), cell = 64;
+      for (let gy = 0; gy < h / cell; gy++) for (let gx = 0; gx < w / cell; gx++) {
+        const cx = gx * cell + cell / 2 + (r() - 0.5) * 16, cy = gy * cell + cell / 2 + (r() - 0.5) * 16;
+        const pts = Array.from({ length: 7 }, (_, k) => { const a = k / 7 * Math.PI * 2 + r() * 0.4, rr = cell * (0.36 + r() * 0.1); return [Math.cos(a) * rr, Math.sin(a) * rr]; });
+        wrapDraw(w, h, cx, cy, (x, y) => { g.beginPath(); pts.forEach(([px, py], k) => k ? g.lineTo(x + px, y + py) : g.moveTo(x + px, y + py)); g.closePath(); g.fill(); });
+      }
+    });
+    TEX.cow = canvasTex(512, 512, (g, w, h) => {
+      g.fillStyle = '#f7f5f0'; g.fillRect(0, 0, w, h);
+      g.fillStyle = '#1b1b1b';
+      const r = rng(21);
+      for (let i = 0; i < 7; i++) {
+        const cx = r() * w, cy = r() * h;
+        for (let k = 0; k < 9; k++) {
+          const x = cx + (r() - 0.5) * 90, y = cy + (r() - 0.5) * 70, rad = 22 + r() * 30;
+          wrapDraw(w, h, x, y, (px, py) => { g.beginPath(); g.ellipse(px, py, rad, rad * (0.7 + r() * 0.4), r() * 3, 0, Math.PI * 2); g.fill(); });
+        }
+      }
+    });
+    TEX.tabby = canvasTex(512, 512, (g, w, h) => {
+      g.fillStyle = '#e7a35e'; g.fillRect(0, 0, w, h);
+      g.fillStyle = '#b4672f';
+      const n = 16;
+      for (let i = 0; i < n; i++) {
+        const y0 = (i + 0.5) * h / n, th = 5 + (i % 2) * 3;
+        g.beginPath();
+        for (let x = 0; x <= w; x += 8) g.lineTo(x, y0 + Math.sin(x / w * Math.PI * 6 + i * 1.7) * 9 - th);
+        for (let x = w; x >= 0; x -= 8) g.lineTo(x, y0 + Math.sin(x / w * Math.PI * 6 + i * 1.7) * 9 + th);
+        g.closePath(); g.fill();
+      }
+    });
+
+    const SPH = new THREE.SphereGeometry(1, 40, 28);
+    const SPH_X = SPH.clone().rotateZ(Math.PI / 2);   // poles along the body's length (for ring patterns)
+    const mats = new Map();
+    function M(color, map = TEX.grain, rough = 0.88) {
+      const key = color + '|' + (map ? map.uuid : '') + '|' + rough;
+      if (!mats.has(key)) mats.set(key, new THREE.MeshStandardMaterial({ color, map, roughness: rough, metalness: 0, envMapIntensity: 0.35 }));
+      return mats.get(key);
+    }
+    const V = (x, y, z) => new THREE.Vector3(x, y, z);
+    function blob(parent, m, p, s, geo = SPH, rot = null) {
+      const o = new THREE.Mesh(geo, m);
+      o.position.set(p[0], p[1], p[2]); o.scale.set(s[0], s[1], s[2]);
+      if (rot) o.rotation.set(rot[0], rot[1], rot[2]);
+      parent.add(o); return o;
+    }
+    // A smooth tapered limb between points a and b
+    function tube(parent, m, a, b, r1, r2, caps = true) {
+      const A = Array.isArray(a) ? V(...a) : a, B = Array.isArray(b) ? V(...b) : b;
+      const len = A.distanceTo(B);
+      const mesh = new THREE.Mesh(new THREE.CylinderGeometry(r2, r1, len, 28, 1, true), m);
+      mesh.position.copy(A).add(B).multiplyScalar(0.5);
+      mesh.quaternion.setFromUnitVectors(V(0, 1, 0), B.clone().sub(A).normalize());
+      parent.add(mesh);
+      if (caps) { blob(parent, m, A.toArray(), [r1, r1, r1]); blob(parent, m, B.toArray(), [r2, r2, r2]); }
+      return mesh;
+    }
+    // A chain of tubes through several points, tapering from r0 to r1
+    function chain(parent, m, pts, r0, r1) {
+      for (let i = 0; i < pts.length - 1; i++) {
+        const k0 = i / (pts.length - 1), k1 = (i + 1) / (pts.length - 1);
+        tube(parent, m, pts[i], pts[i + 1], r0 + (r1 - r0) * k0, r0 + (r1 - r0) * k1);
+      }
+    }
+    const glossy = new Map();
+    function wet(color) {   // shiny, wet-looking material for eyes and noses
+      if (!glossy.has(color)) glossy.set(color, new THREE.MeshPhysicalMaterial({ color, roughness: 0.12, clearcoat: 1, clearcoatRoughness: 0.04, envMapIntensity: 1.3 }));
+      return glossy.get(color);
+    }
+    let IRIS = 0x4a2c14;   // eye colour of the animal being built
+    function eye(parent, p, r) {
+      const side = Math.sign(p[2]) || 1;
+      blob(parent, M(0x2a1d14, TEX.grain, 0.8), p, [r * 1.18, r * 1.1, r * 1.18]);             // eyelid rim
+      blob(parent, wet(IRIS), [p[0], p[1], p[2] + side * r * 0.12], [r, r, r]);              // eyeball + iris
+      blob(parent, wet(0x050403), [p[0] + r * 0.25, p[1], p[2] + side * r * 0.62], [r * 0.5, r * 0.55, r * 0.42]); // pupil
+    }
+
+    // =====================================================================
+    // 3D: GENERIC FOUR-LEGGED ANIMAL
+    // =====================================================================
+    function quadruped(o) {
+      const root = new THREE.Group(), anim = {};
+      const c = o.c;
+      const bodyY = o.legLen + o.h * 0.5;
+      const slope = o.slope || 0;
+      const mBody = M(c.body, o.bodyMap || TEX.grain, o.rough ?? 0.88);
+      const geoB = o.bodyMap ? SPH_X : SPH;
+
+      // body: main barrel + chest and rump for a natural silhouette
+      const bodyG = new THREE.Group(); bodyG.position.set(0, bodyY, 0); bodyG.rotation.z = slope; root.add(bodyG); anim.body = bodyG;
+      blob(bodyG, mBody, [0, 0, 0], [o.len / 2, o.h / 2, o.w / 2], geoB);
+      blob(bodyG, mBody, [o.len * 0.27, o.h * 0.04, 0], [o.len * 0.25, o.h * 0.53, o.w * 0.5], geoB);
+      blob(bodyG, mBody, [-o.len * 0.29, o.h * 0.03, 0], [o.len * 0.24, o.h * 0.51, o.w * 0.51], geoB);
+      if (c.belly) blob(bodyG, M(c.belly), [o.len * 0.05, -o.h * 0.2, 0], [o.len * 0.36, o.h * 0.32, o.w * 0.42]);
+      if (o.hump) blob(bodyG, mBody, [o.len * 0.22, o.h * 0.35, 0], [o.len * 0.22, o.h * 0.3, o.w * 0.42]);
+
+      // legs with real joints: front legs bend at elbow + knee, hind legs at stifle + hock
+      const mLeg = M(c.leg ?? c.body, o.legMap || o.bodyMap || TEX.grain, o.rough ?? 0.88);
+      const mLow = c.lower != null ? M(c.lower, o.legMap || o.bodyMap || TEX.grain, o.rough ?? 0.88) : mLeg;
+      const mHoof = M(c.hoof ?? 0x2a2420, TEX.grain, 0.5);
+      const L = o.legLen, R = o.legR;
+      for (const sx of [1, -1]) for (const sz of [1, -1]) {
+        const x = sx * o.len * 0.3, z = sz * o.w * 0.27;
+        const topY = bodyY + x * Math.tan(slope) - o.h * 0.05;
+        const footY = R * 0.9;
+        let pts, rad;
+        if (o.pillar) { pts = [[x, topY, z], [x, L * 0.5, z], [x, footY, z]]; rad = [R * 1.35, R * 1.05, R * 1.0]; }
+        else if (sx > 0) { pts = [[x, topY, z], [x - 0.05 * L, L * 0.6, z], [x + 0.01 * L, L * 0.3, z], [x + 0.03 * L, footY, z]]; rad = [R * (o.thigh ?? 1.5), R * 1.02, R * 0.8, R * 0.76]; }
+        else { pts = [[x, topY, z], [x + 0.14 * L, L * 0.6, z], [x - 0.1 * L, L * 0.3, z], [x - 0.05 * L, footY, z]]; rad = [R * (o.thigh ?? 1.5) * 1.15, R * 1.1, R * 0.78, R * 0.74]; }
+        blob(root, mLeg, [x + (sx > 0 ? 0 : 0.03 * L), topY - R * 1.6, z], [R * (sx > 0 ? 1.55 : 1.8), R * 2.4, R * 1.3]);   // shoulder / thigh muscle
+        for (let i = 0; i < pts.length - 1; i++) tube(root, i >= pts.length - 2 ? mLow : mLeg, pts[i], pts[i + 1], rad[i], rad[i + 1]);
+        const f = pts[pts.length - 1];
+        blob(root, mHoof, [f[0] + R * 0.15, R * 0.5, z], [R * (o.pawL ?? 1.05), R * 0.55, R * 0.95]);
+      }
+
+      // neck
+      const nb = V(o.len * 0.36, bodyY + o.len * 0.36 * Math.tan(slope) + o.h * 0.18, 0);
+      const nd = V(Math.cos(o.neckAng), Math.sin(o.neckAng), 0);
+      const ne = nb.clone().addScaledVector(nd, o.neckLen);
+      const mNeck = M(c.neck ?? c.body, o.neckMap || o.bodyMap || TEX.grain, o.rough ?? 0.88);
+      tube(root, mNeck, nb, ne, o.neckR * 1.3, o.neckR);
+
+      // mane along the top of the neck
+      if (o.mane) {
+        const perp = V(-nd.y, nd.x, 0);
+        const n = 9;
+        for (let i = 0; i <= n; i++) {
+          const k = i / n;
+          const p = nb.clone().lerp(ne, k * 0.95 + 0.02).addScaledVector(perp, o.neckR * (1.25 - 0.3 * k));
+          const col = o.mane.alt && i % 2 ? o.mane.alt : o.mane.color;
+          blob(root, M(col), p.toArray(), [o.neckR * 0.35, o.neckR * o.mane.h, o.neckR * 0.18], SPH, [0, 0, o.neckAng - Math.PI / 2 + 0.25]);
+        }
+      }
+
+      // head
+      const head = new THREE.Group(); head.position.copy(ne); root.add(head); anim.head = head;
+      const r = o.headR;
+      const mHead = M(c.head ?? c.body, o.headMap || o.bodyMap || TEX.grain, o.rough ?? 0.88);
+      blob(head, mHead, [r * 0.15, r * 0.1, 0], [r * 1.05, r * 0.92, r * 0.85], o.headMap || o.bodyMap ? SPH_X : SPH);
+      if (o.snoutLen > 0) {
+        const a = o.snoutAng ?? 0.2;
+        const s0 = V(r * 0.55, -r * 0.05, 0), s1 = V(r * 0.55 + Math.cos(a) * o.snoutLen, -r * 0.05 - Math.sin(a) * o.snoutLen, 0);
+        tube(head, M(c.snout ?? c.head ?? c.body, o.headMap || TEX.grain), s0, s1, o.snoutR * 1.3, o.snoutR);
+        blob(head, wet(c.nose ?? 0x1a1414), s1.clone().add(V(o.snoutR * 0.95, o.snoutR * 0.25, 0)).toArray(), [o.snoutR * 0.55, o.snoutR * 0.45, o.snoutR * 0.7]);
+      }
+      eye(head, [r * 0.55, r * 0.38, r * 0.62], r * 0.12);
+      eye(head, [r * 0.55, r * 0.38, -r * 0.62], r * 0.12);
+
+      // ears
+      anim.ears = [];
+      for (const side of [1, -1]) {
+        const ep = new THREE.Group(); head.add(ep); anim.ears.push(ep); ep.userData.side = side;
+        const mEar = M(c.ear ?? c.head ?? c.body, TEX.grain);
+        if (o.ears === 'pointy') {
+          ep.position.set(-r * 0.05, r * 0.72, side * r * 0.42); ep.rotation.x = side * 0.32; ep.rotation.z = -0.15;
+          const h = r * (o.earH ?? 0.75);
+          const cone = new THREE.Mesh(new THREE.ConeGeometry(r * 0.24, h, 20), mEar); cone.position.y = h / 2; cone.scale.z = 0.55; ep.add(cone);
+          const inner = new THREE.Mesh(new THREE.ConeGeometry(r * 0.15, h * 0.75, 16), M(c.earIn ?? 0xe9a8a0)); inner.position.set(r * 0.06, h * 0.42, 0); inner.scale.z = 0.4; ep.add(inner);
+        } else if (o.ears === 'floppy') {
+          ep.position.set(-r * 0.05, r * 0.55, side * r * 0.7); ep.rotation.x = side * 0.22;
+          blob(ep, mEar, [-r * 0.05, -r * 0.45, 0], [r * 0.38, r * 0.62, r * 0.12]);
+        } else if (o.ears === 'round') {
+          ep.position.set(-r * 0.1, r * 0.78, side * r * 0.55); ep.rotation.x = side * 0.5;
+          blob(ep, mEar, [0, 0, 0], [r * 0.27, r * 0.27, r * 0.13]);
+          blob(ep, M(c.earIn ?? 0x3a2416), [r * 0.06, 0, 0], [r * 0.15, r * 0.15, r * 0.08]);
+        } else if (o.ears === 'side') {
+          ep.position.set(-r * 0.15, r * 0.45, side * r * 0.75); ep.rotation.x = side * -0.35;
+          blob(ep, mEar, [0, 0, side * r * 0.32], [r * 0.18, r * 0.08, r * 0.4]);
+          blob(ep, M(c.earIn ?? 0xe9a8a0), [r * 0.05, r * 0.02, side * r * 0.34], [r * 0.1, r * 0.05, r * 0.3]);
+        }
+      }
+
+      // tail
+      const tail = new THREE.Group(); tail.position.set(-o.len * 0.5, bodyY - o.len * 0.5 * Math.tan(slope) + o.h * 0.22, 0); root.add(tail); anim.tail = tail;
+      const mTail = M(c.tail ?? c.body, o.tailMap || TEX.grain);
+      const tt = o.tail;
+      if (tt === 'up') chain(tail, mTail, [V(0, 0, 0), V(-0.15, 0.1, 0), V(-0.24, 0.28, 0), V(-0.22, 0.42, 0)], 0.055, 0.03);
+      if (tt === 'long') chain(tail, mTail, [V(0, 0, 0), V(-0.18, 0.02, 0), V(-0.32, 0.2, 0), V(-0.36, 0.45, 0), V(-0.28, 0.62, 0)], 0.045, 0.032);
+      if (tt === 'hair') {
+        chain(tail, M(c.body), [V(0, 0, 0), V(-0.1, -0.06, 0)], 0.07, 0.06);
+        blob(tail, mTail, [-0.2, -0.42, 0], [0.11, 0.48, 0.09], SPH, [0, 0, -0.3]);
+      }
+      if (tt === 'tuft') {
+        chain(tail, M(c.body, o.tailMap || TEX.grain), [V(0, 0, 0), V(-0.08, -0.22, 0), V(-0.1, -0.52, 0)], 0.03, 0.022);
+        blob(tail, M(c.tuft ?? 0x1c1612), [-0.1, -0.6, 0], [0.05, 0.11, 0.05]);
+      }
+      if (tt === 'stub') blob(tail, mTail, [-0.02, 0, 0], [o.stub ?? 0.08, o.stub ?? 0.08, o.stub ?? 0.08]);
+
+      anim.headR = r; anim.root = root;
+      return { root, anim, nb, ne, bodyY };
+    }
+
+    // =====================================================================
+    // 3D: FUR (layered "shell" fur) + merging parts for speed
+    // =====================================================================
+    // How furry each animal is: len = fur length, den = strand density (0 = smooth coat)
+    const FUR = {
+      dog: { len: 0.035, den: 120 }, cat: { len: 0.028, den: 150 }, horse: { len: 0 }, zebra: { len: 0 },
+      sheep: { len: 0.045, den: 85 }, cow: { len: 0.009, den: 210 }, elephant: { len: 0 }, bear: { len: 0.07, den: 75 },
+      giraffe: { len: 0 }, bird: { len: 0.02, den: 150 }
+    };
+    const SHELLS = 12;
+    function mergeGroup(group) {
+      group.children.filter(ch => ch.isGroup).forEach(mergeGroup);
+      const byMat = new Map();
+      [...group.children].forEach(ch => {
+        if (!ch.isMesh) return;
+        ch.updateMatrix();
+        const g = ch.geometry.clone().applyMatrix4(ch.matrix);
+        if (!byMat.has(ch.material)) byMat.set(ch.material, []);
+        byMat.get(ch.material).push(g);
+        group.remove(ch);
+      });
+      byMat.forEach((geos, m) => group.add(new THREE.Mesh(mergeGeometries(geos, false), m)));
+    }
+    const furMats = new Map();
+    function furMat(base, i, len, den) {
+      const key = base.uuid + '|' + i + '|' + len + '|' + den;
+      if (furMats.has(key)) return furMats.get(key);
+      const m = base.clone();
+      const hgt = i / SHELLS;
+      m.onBeforeCompile = sh => {
+        sh.uniforms.uH = { value: hgt }; sh.uniforms.uLen = { value: len }; sh.uniforms.uDen = { value: den };
+        sh.vertexShader = sh.vertexShader
+          .replace('#include <common>', '#include <common>\nuniform float uH; uniform float uLen; varying vec3 vFurP;')
+          .replace('#include <begin_vertex>', '#include <begin_vertex>\nvFurP = position;\ntransformed += normal * uLen * uH;\ntransformed.y -= uLen * 0.5 * uH * uH;');
+        sh.fragmentShader = sh.fragmentShader
+          .replace('#include <common>', '#include <common>\nuniform float uH; uniform float uDen; varying vec3 vFurP;\nfloat furHash(vec3 p){ return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453); }')
+          .replace('#include <map_fragment>', `#include <map_fragment>
+            vec3 cp = vFurP * uDen;
+            vec3 cell = floor(cp);
+            vec3 cf = fract(cp) - 0.5;
+            float strand = furHash(cell);
+            float thick = mix(0.62, 0.12, uH);
+            if (strand < uH * 0.95 || length(cf) > thick) discard;
+            diffuseColor.rgb *= mix(0.55, 1.12, uH) * (0.9 + 0.2 * furHash(cell + 7.0));`);
+      };
+      m.customProgramCacheKey = () => 'fur-shell';
+      furMats.set(key, m);
+      return m;
+    }
+    // If the phone can't keep up (below ~30 fps), hide half of the fur layers
+    let slowTime = 0, furReduced = false;
+    function furQuality(dt) {
+      if (furReduced || !current3d || current3d.real) return;
+      slowTime = dt > 0.034 ? slowTime + dt : Math.max(0, slowTime - dt);
+      if (slowTime > 2) {
+        furReduced = true;
+        scene.traverse(o => { if (o.userData.shell && o.userData.shellIndex % 2 === 1) o.visible = false; });
+      }
+    }
+    function finalizeModel(root, fur) {
+      mergeGroup(root);
+      if (!fur || !fur.len) return;
+      const bases = [];
+      root.traverse(o => { if (o.isMesh && o.material.isMeshStandardMaterial && !o.material.isMeshPhysicalMaterial && o.material.roughness >= 0.85) bases.push(o); });
+      bases.forEach(mesh => {
+        for (let i = 1; i <= SHELLS; i++) {
+          const s = new THREE.Mesh(mesh.geometry, furMat(mesh.material, i, fur.len, fur.den));
+          s.castShadow = false; s.receiveShadow = false; s.userData.shell = true; s.userData.shellIndex = i;
+          if (furReduced && i % 2 === 1) s.visible = false;
+          mesh.add(s);
+        }
+      });
+    }
+
+    // =====================================================================
+    // 3D: THE ANIMALS
+    // =====================================================================
+    const BUILD = {
+      dog() {
+        IRIS = 0x5a3414;
+        return quadruped({ len: 1.5, h: 0.6, w: 0.5, legLen: 0.62, legR: 0.085, neckLen: 0.38, neckR: 0.16, neckAng: 1.0,
+          headR: 0.25, snoutLen: 0.22, snoutR: 0.1, snoutAng: 0.12, ears: 'floppy', tail: 'up',
+          c: { body: 0xc68a4c, belly: 0xe6c08f, snout: 0xdcae7c, ear: 0xa8703c, leg: 0xcf9658, hoof: 0x3a2a20 } });
+      },
+      cat() {
+        IRIS = 0x9aa83a;
+        const q = quadruped({ len: 1.2, h: 0.44, w: 0.38, legLen: 0.46, legR: 0.06, neckLen: 0.18, neckR: 0.13, neckAng: 0.95,
+          headR: 0.23, snoutLen: 0.06, snoutR: 0.08, snoutAng: 0.25, ears: 'pointy', earH: 0.85, tail: 'long',
+          bodyMap: TEX.tabby, headMap: TEX.tabby, tailMap: TEX.tabby, legMap: TEX.tabby,
+          c: { body: 0xffffff, belly: 0xf6e3cc, head: 0xffffff, snout: 0xf6e3cc, ear: 0xe7a35e, leg: 0xffffff, hoof: 0xf3dcc0, nose: 0xe2858e, tail: 0xffffff, neck: 0xffffff } });
+        // whiskers
+        const wm = new THREE.LineBasicMaterial({ color: 0xffffff });
+        const r = q.anim.headR;
+        for (const side of [1, -1]) for (const k of [-1, 0, 1]) {
+          const g = new THREE.BufferGeometry().setFromPoints([V(r * 0.78, -r * 0.08, side * r * 0.25), V(r * 1.15, -r * 0.08 + k * r * 0.12, side * r * 0.75)]);
+          q.anim.head.add(new THREE.Line(g, wm));
+        }
+        return q;
+      },
+      horse() {
+        IRIS = 0x2a1a0e;
+        return quadruped({ len: 2.0, h: 0.8, w: 0.6, legLen: 1.15, legR: 0.08, legTaper: 0.8, neckLen: 0.85, neckR: 0.2, neckAng: 0.95,
+          headR: 0.22, snoutLen: 0.46, snoutR: 0.12, snoutAng: 0.95, ears: 'pointy', earH: 0.7, tail: 'hair', rough: 0.5,
+          mane: { color: 0x1a110b, h: 0.75 },
+          c: { body: 0x7b3e1c, snout: 0x5e2f16, ear: 0x6a3418, leg: 0x6e3719, lower: 0x1c130d, hoof: 0x1a1612, tail: 0x1a110b, nose: 0x2a1d16 } });
+      },
+      zebra() {
+        IRIS = 0x1a120c;
+        return quadruped({ len: 1.85, h: 0.78, w: 0.6, legLen: 1.0, legR: 0.08, legTaper: 0.8, neckLen: 0.75, neckR: 0.2, neckAng: 0.92,
+          headR: 0.21, snoutLen: 0.42, snoutR: 0.115, snoutAng: 0.95, ears: 'pointy', earH: 0.8, tail: 'tuft', rough: 0.7,
+          bodyMap: TEX.zebra, headMap: TEX.zebra, legMap: TEX.zebra, tailMap: TEX.zebra,
+          mane: { color: 0x141414, alt: 0xf2efe8, h: 0.6 },
+          c: { body: 0xffffff, head: 0xffffff, snout: 0x2a2a2a, ear: 0xf2efe8, earIn: 0x222222, leg: 0xffffff, hoof: 0x1a1a1a, tuft: 0x141414, neck: 0xffffff } });
+      },
+      sheep() {
+        IRIS = 0x7a5f22;
+        const q = quadruped({ len: 1.35, h: 0.75, w: 0.75, legLen: 0.5, legR: 0.06, neckLen: 0.2, neckR: 0.17, neckAng: 0.7,
+          headR: 0.22, snoutLen: 0.14, snoutR: 0.1, snoutAng: 0.55, ears: 'side', tail: 'stub', stub: 0.1,
+          c: { body: 0xf1ece2, head: 0x3a3330, snout: 0x3a3330, ear: 0x3a3330, earIn: 0x5a4c48, leg: 0x3a3330, hoof: 0x1f1b19, tail: 0xf1ece2, neck: 0xf1ece2 } });
+        // fluffy wool puffs
+        const r = rng(5), wool = M(0xf3eee4);
+        for (let i = 0; i < 70; i++) {
+          const th = r() * Math.PI * 2, ph = Math.acos(2 * r() - 1);
+          const x = Math.sin(ph) * Math.cos(th), y = Math.cos(ph), z = Math.sin(ph) * Math.sin(th);
+          if (y < -0.45) continue;
+          const s = 0.12 + r() * 0.07;
+          blob(q.anim.body, wool, [x * 1.35 / 2 * 1.0, y * 0.75 / 2 * 1.02, z * 0.75 / 2 * 1.02], [s, s, s]);
+        }
+        for (let i = 0; i < 6; i++) blob(q.anim.head, wool, [-0.06 + (i % 3) * 0.06, 0.2 + (i > 2 ? 0.03 : 0), (i % 3 - 1) * 0.08], [0.09, 0.08, 0.09]);
+        return q;
+      },
+      cow() {
+        IRIS = 0x2a1a10;
+        const q = quadruped({ len: 1.9, h: 0.85, w: 0.7, legLen: 0.78, legR: 0.1, neckLen: 0.38, neckR: 0.26, neckAng: 0.5,
+          headR: 0.27, snoutLen: 0.22, snoutR: 0.17, snoutAng: 0.65, ears: 'side', tail: 'tuft',
+          bodyMap: TEX.cow, headMap: TEX.cow, legMap: TEX.cow,
+          c: { body: 0xffffff, head: 0xffffff, snout: 0xf0b3a8, nose: 0xd98c86, ear: 0xf7f5f0, leg: 0xffffff, hoof: 0x2a2420, neck: 0xffffff, tuft: 0x1b1b1b } });
+        const r = q.anim.headR;
+        for (const side of [1, -1]) chain(q.anim.head, M(0xe9dcc0, TEX.grain, 0.5), [V(-r * 0.05, r * 0.7, side * r * 0.45), V(0, r * 0.9, side * r * 0.75), V(r * 0.1, r * 1.05, side * r * 0.85)], 0.05, 0.02);
+        blob(q.anim.body, M(0xf2b4ae), [-0.45, -0.38, 0], [0.2, 0.12, 0.18]);  // udder
+        return q;
+      },
+      elephant() {
+        IRIS = 0x3a2414;
+        const q = quadruped({ len: 2.2, h: 1.25, w: 1.0, legLen: 0.95, legR: 0.2, legTaper: 1.0, thigh: 1.25, pawL: 1.1, pillar: true, neckLen: 0.12, neckR: 0.45, neckAng: 0.35,
+          headR: 0.5, snoutLen: 0, ears: 'none', tail: 'tuft', bodyMap: null,
+          c: { body: 0x8e8985, leg: 0x8e8985, hoof: 0xd9d0c2, tuft: 0x3a3532 } });
+        // re-skin with wrinkled texture
+        const skin = new THREE.MeshStandardMaterial({ color: 0x7c7671, map: TEX.wrinkle, bumpMap: TEX.wrinkle, bumpScale: 5, roughness: 0.95, envMapIntensity: 0.35 });
+        q.root.traverse(o => { if (o.isMesh && o.material.color && o.material.color.getHex() === 0x8e8985) o.material = skin; });
+        const head = q.anim.head, r = 0.5;
+        // big ears that flap
+        q.anim.ears = [];
+        for (const side of [1, -1]) {
+          const ep = new THREE.Group(); ep.position.set(0.0, 0.08, side * r * 0.7); head.add(ep); ep.userData.side = side; ep.userData.big = true;
+          blob(ep, skin, [-0.36, -0.1, side * 0.04], [0.42, 0.55, 0.06]);
+          blob(ep, new THREE.MeshStandardMaterial({ color: 0x9a8a85, map: TEX.wrinkle, bumpMap: TEX.wrinkle, bumpScale: 3, roughness: 0.95, envMapIntensity: 0.35 }), [-0.34, -0.1, side * 0.075], [0.32, 0.44, 0.03]);
+          q.anim.ears.push(ep);
+        }
+        // trunk
+        const trunk = new THREE.Group(); trunk.position.set(r * 0.72, -r * 0.05, 0); head.add(trunk); q.anim.trunk = trunk;
+        chain(trunk, skin, [V(0, 0, 0), V(r * 0.28, -r * 0.45, 0), V(r * 0.32, -r * 1.0, 0), V(r * 0.3, -r * 1.55, 0), V(r * 0.45, -r * 1.85, 0), V(r * 0.62, -r * 1.82, 0)], 0.17, 0.065);
+        // tusks
+        for (const side of [1, -1]) chain(head, wet(0xefe4cc), [V(r * 0.6, -r * 0.35, side * r * 0.32), V(r * 0.95, -r * 0.72, side * r * 0.36), V(r * 1.25, -r * 0.62, side * r * 0.3)], 0.06, 0.02);
+        return q;
+      },
+      bear() {
+        IRIS = 0x1e120a;
+        return quadruped({ len: 1.6, h: 0.85, w: 0.78, legLen: 0.55, legR: 0.15, legTaper: 1.0, thigh: 1.3, pawL: 1.3, neckLen: 0.24, neckR: 0.3, neckAng: 0.35,
+          headR: 0.3, snoutLen: 0.18, snoutR: 0.12, snoutAng: 0.25, ears: 'round', tail: 'stub', hump: true,
+          c: { body: 0x5c3a22, snout: 0x9a7048, ear: 0x5c3a22, earIn: 0x3a2416, leg: 0x4e3019, hoof: 0x2a1a10 } });
+      },
+      giraffe() {
+        IRIS = 0x2a1a10;
+        const q = quadruped({ len: 1.45, h: 0.72, w: 0.55, legLen: 1.5, legR: 0.07, legTaper: 0.75, neckLen: 1.75, neckR: 0.13, neckAng: 1.15, slope: 0.14,
+          headR: 0.17, snoutLen: 0.24, snoutR: 0.09, snoutAng: 0.55, ears: 'pointy', earH: 0.9, tail: 'tuft', rough: 0.75,
+          bodyMap: TEX.giraffe, headMap: TEX.giraffe, legMap: TEX.giraffe, tailMap: TEX.giraffe,
+          mane: { color: 0x8a4a22, h: 0.45 },
+          c: { body: 0xffffff, head: 0xffffff, snout: 0xe8cfa2, ear: 0xe6cc9a, leg: 0xffffff, hoof: 0x3a2a1e, neck: 0xffffff, tuft: 0x2a1a10 } });
+        const r = q.anim.headR;
+        for (const side of [1, -1]) {
+          tube(q.anim.head, M(0xd7b98a), [-r * 0.1, r * 0.75, side * r * 0.25], [-r * 0.2, r * 1.45, side * r * 0.3], 0.03, 0.025);
+          blob(q.anim.head, M(0x3a2618), [-r * 0.2, r * 1.5, side * r * 0.3], [0.038, 0.038, 0.038]);
+        }
+        return q;
+      },
+      bird() {
+        IRIS = 0x0b0b0b;
+        const root = new THREE.Group(), anim = {};
+        const blue = M(0x3a7fd5), dark = M(0x23508f), white = M(0xf2f2ee), orange = M(0xf0a032, null, 0.5);
+        const body = new THREE.Group(); body.position.set(0, 0.72, 0); root.add(body); anim.body = body;
+        blob(body, blue, [0, 0, 0], [0.48, 0.34, 0.33], SPH, [0, 0, 0.35]);
+        blob(body, white, [0.12, -0.08, 0], [0.34, 0.26, 0.27], SPH, [0, 0, 0.35]);
+        // tail feathers
+        for (const k of [-1, 0, 1]) blob(body, dark, [-0.55, -0.2, k * 0.07], [0.32, 0.05, 0.08], SPH, [k * 0.25, 0, 0.45]);
+        // wings
+        anim.wings = [];
+        for (const side of [1, -1]) {
+          const wp = new THREE.Group(); wp.position.set(0.12, 0.08, side * 0.3); body.add(wp); wp.userData.side = side;
+          blob(wp, dark, [-0.24, -0.02, side * 0.02], [0.4, 0.17, 0.05], SPH, [0, 0, 0.3]);
+          blob(wp, M(0x0f2d55), [-0.42, -0.1, side * 0.035], [0.2, 0.08, 0.03], SPH, [0, 0, 0.3]);
+          anim.wings.push(wp);
+        }
+        // head
+        const head = new THREE.Group(); head.position.set(0.4, 1.07, 0); root.add(head); anim.head = head;
+        blob(head, blue, [0, 0, 0], [0.25, 0.24, 0.23]);
+        blob(head, white, [0.1, -0.08, 0], [0.16, 0.13, 0.17]);
+        blob(head, dark, [-0.12, 0.2, 0], [0.12, 0.1, 0.06], SPH, [0, 0, 0.6]);   // crest
+        const beak = new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.24, 16), orange);
+        beak.rotation.z = -Math.PI / 2; beak.position.set(0.3, -0.02, 0); head.add(beak);
+        eye(head, [0.12, 0.06, 0.17], 0.04); eye(head, [0.12, 0.06, -0.17], 0.04);
+        // legs + toes
+        for (const side of [1, -1]) {
+          tube(root, orange, [0.02, 0.48, side * 0.11], [0.05, 0.03, side * 0.12], 0.03, 0.022);
+          for (const a of [-0.5, 0, 0.5]) tube(root, orange, [0.05, 0.03, side * 0.12], [0.05 + Math.cos(a) * 0.14, 0.02, side * 0.12 + Math.sin(a) * 0.1], 0.016, 0.01);
+          tube(root, orange, [0.05, 0.03, side * 0.12], [-0.08, 0.02, side * 0.12], 0.016, 0.01);
+        }
+        return { root, anim };
+      }
+    };
+
+    // =====================================================================
+    // 3D: SHOWING + ANIMATING
+    // =====================================================================
+    let current3d = null, showToken = 0;
+    const spin = { yaw: -0.5, auto: true, dragging: false, lastX: 0, idleAt: 0 };
+    const gltfLoader = new GLTFLoader();
+    const draco = new DRACOLoader(); draco.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.6/');
+    gltfLoader.setDRACOLoader(draco);
+    const modelCache = {};
+    function loadModel(key) {
+      const m = MODELS[key];
+      if (!m || !m.file) return Promise.reject(new Error('no model file set'));
+      if (!modelCache[key]) modelCache[key] = gltfLoader.loadAsync(m.file);
+      return modelCache[key];
+    }
+
+    function place(object, key, real) {
+      if (current3d) scene.remove(current3d.holder);
+      const holder = new THREE.Group(), inner = new THREE.Group(), turn = new THREE.Group();
+      turn.add(object); inner.add(turn); holder.add(inner);
+      if (real) turn.rotation.y = THREE.MathUtils.degToRad(MODELS[key].rotY || 0);
+      object.traverse(o => { if (o.isMesh && !o.userData.shell) { o.castShadow = true; o.receiveShadow = true; if (o.isSkinnedMesh) o.frustumCulled = false; } });
+      // normalise size & position so every animal fits nicely
+      holder.updateMatrixWorld(true);
+      const box = new THREE.Box3().setFromObject(turn, true);
+      const size = box.getSize(new THREE.Vector3());
+      const s = Math.min(2.7 / Math.max(size.x, size.z, 0.001), 2.3 / Math.max(size.y, 0.001));
+      inner.scale.setScalar(s);
+      const ctr = box.getCenter(new THREE.Vector3());
+      inner.position.set(-ctr.x * s, -box.min.y * s, -ctr.z * s);
+      scene.add(holder);
+      spin.yaw = -0.6;
+      return { holder, inner, t0: performance.now() };
+    }
+
+    function show3d(key) {
+      const token = ++showToken;
+      const credit = document.getElementById('credit'), loading = document.getElementById('loading3d');
+      credit.textContent = ''; loading.style.display = 'block';
+      if (current3d) { scene.remove(current3d.holder); current3d = null; }
+      loadModel(key).then(gltf => {
+        if (token !== showToken) return;
+        const p = place(gltf.scene, key, true);
+        let mixer = null;
+        if (gltf.animations && gltf.animations.length) {
+          mixer = new THREE.AnimationMixer(gltf.scene);
+          const want = (MODELS[key].anim || '').toLowerCase();
+          const clips = gltf.animations;
+          const clip = (want && clips.find(c => c.name.toLowerCase().includes(want)))
+            || clips.find(c => /idle|stand|breath|look|survey/i.test(c.name))
+            || clips[0];
+          mixer.clipAction(clip).play();
+        }
+        current3d = { key, ...p, anim: {}, real: true, mixer };
+        loading.style.display = 'none';
+        credit.textContent = MODELS[key].credit ? '3D model: ' + MODELS[key].credit : '';
+      }).catch(err => {
+        if (token !== showToken) return;
+        console.warn('Realistic model not loaded for ' + key + ' (' + (MODELS[key] && MODELS[key].file) + '):', err && err.message);
+        const built = BUILD[key]();
+        finalizeModel(built.root, FUR[key]);
+        const p = place(built.root, key, false);
+        current3d = { key, ...p, anim: built.anim, real: false, mixer: null };
+        loading.style.display = 'none';
+        credit.textContent = MODELS[key] && MODELS[key].file ? 'Simple model — add ' + MODELS[key].file + ' for a realistic one' : '';
+      });
+    }
+
+    const easeOutBack = k => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(k - 1, 3) + c1 * Math.pow(k - 1, 2); };
+    function animate3d(now, dt) {
+      if (!current3d) return;
+      const t = now / 1000, a = current3d.anim, key = current3d.key;
+      const k = Math.min(1, (now - current3d.t0) / 650);
+      current3d.holder.scale.setScalar(Math.max(0.001, easeOutBack(k)));
+      glowMesh.material.opacity = 0.6 + 0.4 * Math.sin(t * 2.5);
+      if (spin.auto && !spin.dragging && now - spin.idleAt > 2500) spin.yaw += dt * 0.45;
+      current3d.holder.rotation.y = spin.yaw;
+      if (current3d.mixer) current3d.mixer.update(dt);
+      if (current3d.real) return;
+
+      // idle life
+      if (a.body) a.body.scale.y = 1 + 0.018 * Math.sin(t * 2.4);
+      if (a.head) { a.head.rotation.y = Math.sin(t * 0.7) * 0.28; a.head.rotation.z = Math.sin(t * 1.1) * 0.06 - (key === 'horse' || key === 'zebra' ? 0.05 : 0); }
+      if (a.tail) {
+        const wag = key === 'dog' ? Math.sin(t * 12) * 0.45 : key === 'cat' ? Math.sin(t * 1.4) * 0.35 : Math.sin(t * 2.2) * 0.3;
+        a.tail.rotation.y = wag;
+      }
+      if (a.ears) a.ears.forEach((e, i) => {
+        if (e.userData.big) e.rotation.y = e.userData.side * (0.15 + 0.22 * (0.5 + 0.5 * Math.sin(t * 1.6)));
+        else e.rotation.y = Math.max(0, Math.sin(t * 0.9 + i * 2.2) - 0.92) * 4 * e.userData.side;
+      });
+      if (a.trunk) { a.trunk.rotation.z = Math.sin(t * 1.1) * 0.18; a.trunk.rotation.x = Math.sin(t * 0.7) * 0.15; }
+      if (a.wings) {
+        const ph = t % 4;
+        const flap = ph < 0.9 ? Math.sin(ph * 28) * 0.9 * Math.sin(ph / 0.9 * Math.PI) : 0;
+        a.wings.forEach(w => { w.rotation.x = -w.userData.side * Math.max(0, flap); });
+        if (a.head) { a.head.rotation.z = Math.sin(t * 3) * 0.12; a.head.rotation.y = Math.round(Math.sin(t * 0.8) * 2) * 0.25; }
+      }
+    }
+
+    // drag to rotate
+    view.addEventListener('pointerdown', e => { spin.dragging = true; spin.lastX = e.clientX; view.setPointerCapture(e.pointerId); view.style.cursor = 'grabbing'; });
+    view.addEventListener('pointermove', e => { if (!spin.dragging) return; spin.yaw += (e.clientX - spin.lastX) * 0.012; spin.lastX = e.clientX; });
+    const endDrag = () => { spin.dragging = false; spin.idleAt = performance.now(); view.style.cursor = 'grab'; };
+    view.addEventListener('pointerup', endDrag); view.addEventListener('pointercancel', endDrag);
+
+    // =====================================================================
+    // CAMERA FEED + DETECTION
+    // =====================================================================
+    const demo = new URLSearchParams(location.search).has('demo');
+    const cam = document.getElementById('cam'), cctx = cam.getContext('2d');
+    const video = document.getElementById('v');
+    const statusEl = document.getElementById('status');
+    let W = 0, H = 0, DPR = 1, facing = 'environment', detector = null;
+    let vmap = { s: 1, ox: 0, oy: 0, dw: 0, dh: 0 };
+    let dets = [], lastDetect = 0, lastVideoTime = -1;
+    const votes = {};
+    let currentKey = null, manual = false;
+
+    function layout() {
+      DPR = Math.min(devicePixelRatio || 1, 2);
+      W = cam.width = Math.round(innerWidth * DPR); H = cam.height = Math.round(innerHeight * DPR);
+      const card = document.getElementById('card');
+      const free = Math.max(160, innerHeight - (document.body.classList.contains('showing') ? card.offsetHeight : 0) - 64);
+      view.style.height = free + 'px';
+      renderer.setSize(innerWidth, free, false);
+      camera3.aspect = innerWidth / free;
+      // keep the animal fully in view on narrow (portrait) screens
+      camera3.position.z = camera3.aspect < 1 ? 6.2 / Math.max(0.55, camera3.aspect) : 6.2;
+      camera3.updateProjectionMatrix();
+    }
+    addEventListener('resize', layout);
+
+    function drawVideo() {
+      const vw = video.videoWidth, vh = video.videoHeight;
+      if (!vw) return false;
+      const s = Math.max(W / vw, H / vh);
+      vmap = { s, dw: vw * s, dh: vh * s, ox: (W - vw * s) / 2, oy: (H - vh * s) / 2 };
+      cctx.save();
+      if (facing === 'user') { cctx.translate(W, 0); cctx.scale(-1, 1); }
+      cctx.drawImage(video, vmap.ox, vmap.oy, vmap.dw, vmap.dh);
+      cctx.restore();
+      return true;
+    }
+    function boxToScreen(b) {
+      if (demo) return b;
+      let x = vmap.ox + b.originX * vmap.s;
+      const y = vmap.oy + b.originY * vmap.s, w = b.width * vmap.s, h = b.height * vmap.s;
+      if (facing === 'user') x = W - x - w;
+      return { originX: x, originY: y, width: w, height: h };
+    }
+    function drawBoxes() {
+      dets.forEach(d => {
+        const b = boxToScreen(d.box);
+        const locked = d.label === currentKey;
+        const col = locked ? '#7dffad' : '#ffffff';
+        const L = Math.min(b.width, b.height) * 0.22;
+        cctx.save();
+        cctx.strokeStyle = col; cctx.lineWidth = 4 * DPR; cctx.lineCap = 'round';
+        cctx.shadowColor = 'rgba(0,0,0,0.5)'; cctx.shadowBlur = 6 * DPR;
+        const x0 = b.originX, y0 = b.originY, x1 = x0 + b.width, y1 = y0 + b.height;
+        [[x0, y0, 1, 1], [x1, y0, -1, 1], [x0, y1, 1, -1], [x1, y1, -1, -1]].forEach(([x, y, dx, dy]) => {
+          cctx.beginPath(); cctx.moveTo(x + dx * L, y); cctx.lineTo(x, y); cctx.lineTo(x, y + dy * L); cctx.stroke();
+        });
+        const txt = `${ANIMALS[d.label].emoji} ${ANIMALS[d.label].name} ${Math.round(d.score * 100)}%`;
+        cctx.font = `700 ${15 * DPR}px system-ui, sans-serif`;
+        const tw = cctx.measureText(txt).width + 18 * DPR, th = 28 * DPR;
+        const ty = Math.max(4 * DPR, y0 - th - 6 * DPR);
+        cctx.shadowBlur = 0;
+        cctx.fillStyle = locked ? '#2f7d4f' : 'rgba(0,0,0,0.6)';
+        cctx.beginPath(); cctx.roundRect(x0, ty, tw, th, 14 * DPR); cctx.fill();
+        cctx.fillStyle = '#fff'; cctx.textBaseline = 'middle';
+        cctx.fillText(txt, x0 + 9 * DPR, ty + th / 2);
+        cctx.restore();
+      });
+    }
+
+    function tallyVotes() {
+      Object.keys(votes).forEach(k => votes[k] *= 0.6);
+      dets.forEach(d => { if (d.score >= MIN_SCORE) votes[d.label] = (votes[d.label] || 0) + d.score; });
+      let best = null, bv = 0;
+      Object.keys(votes).forEach(k => { if (votes[k] > bv) { bv = votes[k]; best = k; } });
+      if (!manual && best && bv > 1.3 && best !== currentKey) {
+        const top = dets.filter(d => d.label === best).sort((a, b) => b.score - a.score)[0];
+        showAnimal(best, top ? top.score : null);
+      }
+    }
+
+    function runDetection(now) {
+      if (!detector || now - lastDetect < 110 || video.currentTime === lastVideoTime) return;
+      lastDetect = now; lastVideoTime = video.currentTime;
+      const res = detector.detectForVideo(video, now);
+      dets = (res.detections || []).map(d => ({ label: d.categories[0].categoryName, score: d.categories[0].score, box: d.boundingBox }))
+        .filter(d => ANIMALS[d.label]);
+      tallyVotes();
+    }
+
+    // =====================================================================
+    // INFO CARD
+    // =====================================================================
+    const $ = id => document.getElementById(id);
+    function showAnimal(key, score) {
+      const a = ANIMALS[key];
+      currentKey = key;
+      $('cEmoji').textContent = a.emoji; $('cName').textContent = a.name; $('cSci').textContent = a.sci;
+      $('cConf').textContent = score != null ? `✓ ${Math.round(score * 100)}% match` : '📖 Browsing';
+      $('cDef').textContent = a.def; $('fClass').textContent = a.cls; $('fDiet').textContent = a.diet;
+      $('fHab').textContent = a.habitat; $('fLife').textContent = a.life; $('cFact').textContent = a.fact;
+      document.body.classList.add('showing');
+      $('card').scrollTop = 0;
+      show3d(key);
+      requestAnimationFrame(layout);
+      setTimeout(layout, 480);
+      ding();
+      if ('speechSynthesis' in window) speechSynthesis.cancel();
+    }
+    function rescan() {
+      currentKey = null; manual = false;
+      Object.keys(votes).forEach(k => delete votes[k]);
+      document.body.classList.remove('showing');
+      showToken++;
+      if (current3d) { scene.remove(current3d.holder); current3d = null; }
+      document.getElementById('loading3d').style.display = 'none';
+      if ('speechSynthesis' in window) speechSynthesis.cancel();
+      layout();
+    }
+
+    let actx = null;
+    function ding() {
+      try {
+        actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+        const t0 = actx.currentTime;
+        [880, 1320].forEach((f, i) => {
+          const o = actx.createOscillator(), g = actx.createGain();
+          o.frequency.value = f; g.gain.setValueAtTime(0.0001, t0 + i * 0.09);
+          g.gain.exponentialRampToValueAtTime(0.06, t0 + i * 0.09 + 0.01);
+          g.gain.exponentialRampToValueAtTime(0.0001, t0 + i * 0.09 + 0.25);
+          o.connect(g).connect(actx.destination); o.start(t0 + i * 0.09); o.stop(t0 + i * 0.09 + 0.3);
+        });
+      } catch (e) {}
+    }
+
+    $('speakBtn').addEventListener('click', () => {
+      if (!currentKey || !('speechSynthesis' in window)) return;
+      const a = ANIMALS[currentKey];
+      speechSynthesis.cancel();
+      speechSynthesis.speak(new SpeechSynthesisUtterance(`${a.name}. ${a.def} Fun fact: ${a.fact}`));
+    });
+    $('rescanBtn').addEventListener('click', rescan);
+
+    // browse list
+    const grid = $('grid');
+    ORDER.forEach(k => {
+      const b = document.createElement('button');
+      b.innerHTML = `${ANIMALS[k].emoji}<span>${ANIMALS[k].name}</span>`;
+      b.addEventListener('click', () => { $('list').classList.remove('open'); manual = true; showAnimal(k, null); });
+      grid.appendChild(b);
+    });
+    const openList = () => $('list').classList.add('open');
+    $('listBtn').addEventListener('click', openList); $('listBtn2').addEventListener('click', openList);
+    $('closeList').addEventListener('click', () => $('list').classList.remove('open'));
+
+    // =====================================================================
+    // DEMO MODE (?demo): pretends to detect each animal in turn
+    // =====================================================================
+    const demoState = { clock: 0 };
+    function demoDetect() {
+      const ph = demoState.clock % 6, idx = Math.floor(demoState.clock / 6) % ORDER.length;
+      const bw = W * 0.6, bh = H * 0.32;
+      dets = ph < 0.8 ? [] : [{ label: ORDER[idx], score: 0.86 + 0.08 * Math.sin(demoState.clock * 3), box: { originX: (W - bw) / 2, originY: H * 0.14, width: bw, height: bh } }];
+      tallyVotes();
+    }
+
+    // =====================================================================
+    // MAIN LOOP
+    // =====================================================================
+    let prev = performance.now(), lastDemoTick = 0;
+    function loop(now) {
+      const dt = Math.min((now - prev) / 1000, 0.05); prev = now;
+      cctx.clearRect(0, 0, W, H);
+      if (demo) {
+        demoState.clock += dt;
+        const g = cctx.createLinearGradient(0, 0, 0, H);
+        g.addColorStop(0, '#5f7f6a'); g.addColorStop(1, '#22352b');
+        cctx.fillStyle = g; cctx.fillRect(0, 0, W, H);
+        if (now - lastDemoTick > 110) { lastDemoTick = now; demoDetect(); }
+      } else if (drawVideo()) {
+        runDetection(now);
+      }
+      document.body.classList.toggle('detecting', dets.length > 0);
+      if (!document.body.classList.contains('showing')) drawBoxes();
+
+      animate3d(now, dt);
+      furQuality(dt);
+      if (current3d) renderer.render(scene, camera3);
+
+      if (!detector && !demo) statusEl.textContent = 'Loading animal detector…';
+      else if (currentKey) statusEl.textContent = manual ? `📖 ${ANIMALS[currentKey].name}` : `✓ ${ANIMALS[currentKey].name} detected — drag to rotate`;
+      else if (dets.length) statusEl.textContent = 'Hold steady…';
+      else statusEl.textContent = '🔍 Point the camera at an animal';
+      requestAnimationFrame(loop);
+    }
+
+    // =====================================================================
+    // START
+    // =====================================================================
+    async function loadDetector() {
+      const files = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.1.0/wasm');
+      const opts = delegate => ({
+        baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite', delegate },
+        runningMode: 'VIDEO', scoreThreshold: 0.3, maxResults: 5, categoryAllowlist: ORDER
+      });
+      try { detector = await ObjectDetector.createFromOptions(files, opts('GPU')); }
+      catch (e) { detector = await ObjectDetector.createFromOptions(files, opts('CPU')); }
+    }
+    async function startCamera() {
+      if (video.srcObject) video.srcObject.getTracks().forEach(t => t.stop());
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+      video.srcObject = stream; await video.play(); lastVideoTime = -1;
+    }
+    const detPromise = demo ? Promise.resolve() : loadDetector().catch(err => { statusEl.textContent = 'Could not load the detector. Check your internet and reload.'; console.error(err); });
+
+    $('startBtn').addEventListener('click', async () => {
+      const msg = $('loadMsg');
+      try { actx = actx || new (window.AudioContext || window.webkitAudioContext)(); actx.resume(); } catch (e) {}
+      try {
+        if (!demo) { msg.textContent = 'Starting camera…'; await startCamera(); msg.textContent = 'Loading animal detector…'; await detPromise; }
+        $('start').style.display = 'none';
+      } catch (err) { msg.textContent = 'Camera error: ' + err.message + '. Allow camera access and reload.'; }
+    });
+    $('flipBtn').addEventListener('click', async () => {
+      if (demo) return;
+      facing = facing === 'user' ? 'environment' : 'user';
+      try { await startCamera(); } catch (e) { statusEl.textContent = 'Could not switch camera'; }
+    });
+
+    layout();
+    if (demo) window.__demo = demoState;
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
